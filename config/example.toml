@@ -1,0 +1,21 @@
+[machine]
+name = "win10"
+memory = "12G"
+
+[cpu]
+amount = 12
+
+[[disk]]
+path = "/dev/disk/by-id/wwn-0x500a0751f008e09d"
+
+[[disk]]
+path = "/dev/disk/by-id/wwn-0x5002538e4038852d"
+
+[uefi]
+enabled = true
+
+[scream]
+enabled = true
+
+[looking-glass]
+enabled = true

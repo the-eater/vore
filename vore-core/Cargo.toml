@@ -1,0 +1,13 @@
+[package]
+name = "vore-core"
+version = "0.1.0"
+authors = ["eater <=@eater.me>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+config = "0.11.0"
+serde = { version = "1.0.125", features = ["serde_derive"] }
+anyhow = "1.0.40"
+kiam = "0.1"
