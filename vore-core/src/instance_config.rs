@@ -7,6 +7,8 @@ use std::str::FromStr;
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct InstanceConfig {
     pub name: String,
+    pub arch: String,
+    pub chipset: String,
     pub kvm: bool,
     pub memory: u64,
     pub cpu: CpuConfig,
@@ -61,6 +63,8 @@ impl Default for InstanceConfig {
     fn default() -> Self {
         InstanceConfig {
             name: "vore".to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            chipset: "q35".to_string(),
             kvm: true,
             // 2 GB
             memory: 2 * 1024 * 1024 * 1024,
