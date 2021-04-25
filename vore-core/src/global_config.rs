@@ -5,13 +5,19 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GlobalConfig {
     pub qemu: GlobalQemuConfig,
+    pub uefi: HashMap<String, GlobalUefiConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GlobalQemuConfig {
-    pub default: Vec<String>,
-    pub arch: HashMap<String, Vec<String>>,
-    pub uefi: Vec<String>,
+    pub script: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "kebab-case"))]
+pub struct GlobalUefiConfig {
+    pub template: String,
+    pub boot_code: String,
 }
 
 impl GlobalConfig {

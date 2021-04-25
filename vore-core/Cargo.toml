@@ -9,7 +9,8 @@ edition = "2018"
 [dependencies]
 config = "0.11.0"
 serde = { version = "1.0.125", features = ["serde_derive"] }
+serde_json = "1.0.64"
 toml = "*"
 anyhow = "1.0.40"
 kiam = "0.1"
-mlua = { version = "0.5.3", features = ["lua54", "serialize"] }
+mlua = { version = "0.5.3", features = ["lua54", "serialize", "send"] }

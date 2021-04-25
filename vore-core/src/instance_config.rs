@@ -14,8 +14,10 @@ pub struct InstanceConfig {
     pub cpu: CpuConfig,
     pub disks: Vec<DiskConfig>,
     pub uefi: UefiConfig,
+    pub vfio: Vec<VfioConfig>,
     pub looking_glass: LookingGlassConfig,
     pub scream: ScreamConfig,
+    pub spice: SpiceConfig,
 }
 
 impl InstanceConfig {
@@ -55,6 +57,33 @@ impl InstanceConfig {
             }
         }
 
+        if let Ok(uefi) = config.get_table("uefi") {
+            instance_config.uefi.apply_table(uefi)?;
+        }
+
+        if let Ok(vfio) = config.get::<Value>("vfio") {
+            let arr = vfio.into_array().context("vfio should be an array")?;
+            for (i, disk) in arr.into_iter().enumerate() {
+                let table = disk
+                    .into_table()
+                    .with_context(|| format!("vfio[{}] should be a table", i))?;
+                instance_config.vfio.push(VfioConfig::from_table(table)?);
+            }
+        }
+
+        if let Ok(looking_glass) = config.get_table("looking-glass") {
+            instance_config.looking_glass =
+                LookingGlassConfig::from_table(looking_glass, &instance_config.name)?;
+        }
+
+        if let Ok(scream) = config.get_table("scream") {
+            instance_config.scream = ScreamConfig::from_table(scream, &instance_config.name)?;
+        }
+
+        if let Ok(scream) = config.get_table("spice") {
+            instance_config.spice = SpiceConfig::from_table(scream)?;
+        }
+
         Ok(instance_config)
     }
 }
@@ -71,8 +100,10 @@ impl Default for InstanceConfig {
             cpu: Default::default(),
             disks: vec![],
             uefi: Default::default(),
+            vfio: vec![],
             looking_glass: Default::default(),
             scream: Default::default(),
+            spice: Default::default(),
         }
     }
 }
@@ -217,31 +248,160 @@ impl Default for UefiConfig {
     }
 }
 
+impl UefiConfig {
+    fn apply_table(&mut self, table: HashMap<String, Value>) -> Result<(), anyhow::Error> {
+        if let Some(enabled) = table
+            .get("enabled")
+            .cloned()
+            .map(|x| x.into_bool().context("eufi.enabled should be a boolean"))
+            .transpose()?
+        {
+            self.enabled = enabled
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ScreamConfig {
     pub enabled: bool,
+    pub mem_path: String,
+    pub buffer_size: u64,
+}
+
+impl ScreamConfig {
+    pub fn from_table(
+        table: HashMap<String, Value>,
+        name: &str,
+    ) -> Result<ScreamConfig, anyhow::Error> {
+        let mut cfg = ScreamConfig::default();
+        if let Some(enabled) = table.get("enabled").cloned() {
+            cfg.enabled = enabled.into_bool()?;
+        }
+
+        if let Some(mem_path) = table.get("mem-path").cloned() {
+            cfg.mem_path = mem_path.into_str()?;
+        } else {
+            cfg.mem_path = format!("/dev/shm/{}-scream", name);
+        }
+
+        if let Some(buffer_size) = table.get("buffer-size").cloned() {
+            cfg.buffer_size = buffer_size.into_int()? as u64;
+        }
+
+        Ok(cfg)
+    }
 }
 
 impl Default for ScreamConfig {
     fn default() -> Self {
-        ScreamConfig { enabled: false }
+        ScreamConfig {
+            enabled: false,
+            mem_path: "".to_string(),
+            buffer_size: 2097152,
+        }
     }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct LookingGlassConfig {
     pub enabled: bool,
+    pub mem_path: String,
+    pub buffer_size: u64,
+    pub width: u64,
+    pub height: u64,
+    pub bit_depth: u64,
 }
 
 impl Default for LookingGlassConfig {
     fn default() -> Self {
-        LookingGlassConfig { enabled: false }
+        LookingGlassConfig {
+            enabled: false,
+            mem_path: "".to_string(),
+            buffer_size: 0,
+            width: 1920,
+            height: 1080,
+            bit_depth: 8,
+        }
+    }
+}
+
+impl LookingGlassConfig {
+    pub fn calc_buffer_size_from_screen(&mut self) {
+        // https://forum.level1techs.com/t/solved-what-is-max-frame-size-determined-by/170312/4
+        //
+        // required memory size is
+        //
+        // height * width * 4 * 2 + 2mb
+        //
+        // And shared memory size needs to be a power off 2
+        //
+        let mut minimum_needed =
+            self.width * self.height * (((self.bit_depth * 4) as f64 / 8f64).ceil() as u64);
+
+        // 2 frames
+        minimum_needed *= 2;
+
+        // Add additional 2mb
+        minimum_needed += 2 * 1024 * 1024;
+
+        let mut i = 1;
+        let mut buffer_size = 1;
+        while buffer_size < minimum_needed {
+            i += 1;
+            buffer_size = 2u64.pow(i);
+        }
+
+        self.buffer_size = buffer_size;
+    }
+
+    pub fn from_table(
+        table: HashMap<String, Value>,
+        name: &str,
+    ) -> Result<LookingGlassConfig, anyhow::Error> {
+        let mut cfg = LookingGlassConfig::default();
+
+        if let Some(enabled) = table.get("enabled").cloned() {
+            cfg.enabled = enabled.into_bool()?;
+        }
+
+        if let Some(mem_path) = table.get("mem-path").cloned() {
+            cfg.mem_path = mem_path.into_str()?;
+        } else {
+            cfg.mem_path = format!("/dev/shm/{}-looking-glass", name);
+        }
+
+        match (table.get("buffer-size").cloned(), table.get("width").cloned(), table.get("height").cloned()) {
+            (Some(buffer_size), None, None) => {
+                cfg.buffer_size = buffer_size.into_int()? as u64;
+            }
+
+            (None, Some(width), Some(height)) => {
+                let width = width.into_int()? as u64;
+                let height = height.into_int()? as u64;
+                let bit_depth = table.get("bit-depth").cloned().map_or(Ok(cfg.bit_depth), |x| x.into_int().map(|x| x as u64))?;
+                cfg.bit_depth = bit_depth;
+                cfg.width = width;
+                cfg.height = height;
+                cfg.calc_buffer_size_from_screen();
+            }
+
+            (None, None, None) => {
+                cfg.calc_buffer_size_from_screen()
+            }
+
+            _ => anyhow::bail!("for looking-glass either width and height need to be set or buffer-size should be set")
+        }
+
+        Ok(cfg)
     }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DiskConfig {
     pub disk_type: String,
+    pub preset: String,
     pub path: String,
 }
 
@@ -264,10 +424,69 @@ impl DiskConfig {
             }).to_string()
         };
 
-        let disk = DiskConfig { disk_type, path };
+        let preset = table.get("preset").cloned().context("gamer")?.into_str()?;
+
+        let disk = DiskConfig {
+            disk_type,
+            preset,
+            path,
+        };
 
         // TODO: Add blockdev details
 
         Ok(disk)
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct VfioConfig {
+    pub slot: String,
+    pub graphics: bool,
+    pub multifunction: bool,
+}
+
+impl VfioConfig {
+    pub fn from_table(table: HashMap<String, Value>) -> Result<VfioConfig, anyhow::Error> {
+        let slot = table
+            .get("slot")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("vfio table needs a slot"))?
+            .into_str()?;
+        let mut cfg = VfioConfig {
+            slot,
+            graphics: false,
+            multifunction: false,
+        };
+
+        if let Some(graphics) = table.get("graphics").cloned() {
+            cfg.graphics = graphics.into_bool()?;
+        }
+
+        if let Some(multifunction) = table.get("multifunction").cloned() {
+            cfg.multifunction = multifunction.into_bool()?;
+        }
+
+        Ok(cfg)
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+pub struct SpiceConfig {
+    pub enabled: bool,
+    pub socket_path: String,
+}
+
+impl SpiceConfig {
+    pub fn from_table(table: HashMap<String, Value>) -> Result<SpiceConfig, anyhow::Error> {
+        let mut cfg = SpiceConfig {
+            enabled: false,
+            socket_path: "/tmp/win10.sock".to_string(),
+        };
+
+        if let Some(enabled) = table.get("enabled").cloned() {
+            cfg.enabled = enabled.into_bool()?;
+        }
+
+        Ok(cfg)
     }
 }

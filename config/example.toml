@@ -6,12 +6,27 @@ memory = "12G"
 amount = 12
 
 [[disk]]
+preset = "ssd"
 path = "/dev/disk/by-id/wwn-0x500a0751f008e09d"
 
 [[disk]]
+preset = "ssd"
 path = "/dev/disk/by-id/wwn-0x5002538e4038852d"
 
 [uefi]
+enabled = true
+
+[[vfio]]
+slot = "08:00.0"
+graphics = true
+
+[[vfio]]
+slot = "08:00.1"
+
+[[vfio]]
+slot = "0a:00.3"
+
+[spice]
 enabled = true
 
 [scream]
@@ -19,3 +34,5 @@ enabled = true
 
 [looking-glass]
 enabled = true
+width = 2560
+height = 1080

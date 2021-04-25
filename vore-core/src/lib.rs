@@ -1,7 +1,8 @@
 mod global_config;
 mod instance_config;
 mod qemu;
+mod virtual_machine;
 
 pub use global_config::*;
 pub use instance_config::*;
-pub use qemu::build_qemu_command;
+pub use qemu::QemuCommandBuilder;

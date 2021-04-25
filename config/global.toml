@@ -1,23 +1,6 @@
 [qemu]
 script = "qemu.lua"
 
-default = [
-    "-rtc", "driftfix=slew",
-    "-serial", "stdio",
-    "-no-hpet",
-    "-boot", "strict=on"
-]
-
-arch.i686 = []
-arch.x86_64 = ["-global", "kvm-pit.lost_tick_policy=discard"]
-
-uefi = [
-    # OVMF will hang if S3 is not disabled
-    # disable S4 too, since libvirt does that 🤷
-    # https://bugs.archlinux.org/task/59465#comment172528
-    "-global", "ICH9-LPC.disable_s3=1",
-    "-global", "ICH9-LPC.disable_s4=1"
-]
-
-[[disk.default]]
-flag = "blockdev"
+[uefi.default]
+boot-code = "/usr/share/OVMF/OVMF_CODE.fd"
+template = "/usr/share/OVMF/OVMF_VARS.fd"
