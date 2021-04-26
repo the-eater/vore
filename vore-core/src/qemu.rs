@@ -259,6 +259,8 @@ impl QemuCommandBuilder {
         let item = VM::default();
         let multi = MultiValue::from_vec(vec![self.lua.to_value(config)?, item.to_lua(&self.lua)?]);
 
+        let working_dir = { self.storage.0.lock().unwrap().working_dir.clone() };
+
         let build_command = if let Some(build_command) = &self
             .storage
             .0
@@ -277,9 +279,32 @@ impl QemuCommandBuilder {
         cmd.push("-name".to_string());
         cmd.push(format!("guest={},debug-threads=on", config.name));
 
+        // Don't start the machine
         cmd.push("-S".to_string());
+
+        // Set timestamps on log
         cmd.push("-msg".to_string());
         cmd.push("timestamp=on".to_string());
+
+        // Drop privileges as soon as possible
+        cmd.push("-runas".to_string());
+        cmd.push("nobody".to_string());
+
+        let working_dir = working_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Can't change working directory into string"))?;
+
+        // Control socket
+        cmd.push("-chardev".to_string());
+        cmd.push(format!(
+            "socket,id=charmonitor,path={}/qemu.sock,server=on,wait=off",
+            working_dir
+        ));
+
+        // Set mode to control so we use qapi/qmp instead of readline mode
+        cmd.push("-mon".to_string());
+        cmd.push("chardev=charmonitor,id=monitor,mode=control".to_string());
+
         cmd.append(&mut vm_instance.args);
 
         self.lua.globals().raw_remove("vore")?;

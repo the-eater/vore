@@ -1,6 +1,7 @@
 [machine]
 name = "win10"
 memory = "12G"
+features = ["uefi", "spice", "scream", "looking-glass"]
 
 [cpu]
 amount = 12
@@ -13,26 +14,27 @@ path = "/dev/disk/by-id/wwn-0x500a0751f008e09d"
 preset = "ssd"
 path = "/dev/disk/by-id/wwn-0x5002538e4038852d"
 
-[uefi]
-enabled = true
+[[disk]]
+preset = "nvme"
+path = "/dev/disk/by-id/nvme-eui.6479a74530201073"
+
+#[[vfio]]
+#vendor = 0x10de
+#device = 0x1b80
+#index = 1
+#
+#graphics = true
+#
+#[[vfio]]
+#vendor = 0x10de
+#device = 0x10f0
+#index = 1
 
 [[vfio]]
-slot = "08:00.0"
-graphics = true
-
-[[vfio]]
-slot = "08:00.1"
-
-[[vfio]]
-slot = "0a:00.3"
-
-[spice]
-enabled = true
-
-[scream]
-enabled = true
+vendor = 0x1022
+device = 0x149c
+addr = "0b:00.3"
 
 [looking-glass]
-enabled = true
 width = 2560
 height = 1080

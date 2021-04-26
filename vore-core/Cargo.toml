@@ -14,3 +14,7 @@ toml = "*"
 anyhow = "1.0.40"
 kiam = "0.1"
 mlua = { version = "0.5.3", features = ["lua54", "serialize", "send"] }
+beau_collector = "0.2.1"
+qapi-qmp = "0.7.0"
+qapi = { version = "0.7.0", features = ["qapi-qmp"] }
+libc = "0.2.94"

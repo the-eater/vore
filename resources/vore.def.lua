@@ -72,7 +72,10 @@ end
 ---@field buffer_size number
 
 ---@class Vfio
----@field slot string
+---@field device number|nil
+---@field vendor number|nil
+---@field index number|nil
+---@field address string
 ---@field graphics boolean
 ---@field multifunction boolean
 

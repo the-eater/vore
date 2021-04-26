@@ -1,7 +1,9 @@
 use anyhow::{Context, Error};
 use config::{Config, File, FileFormat, Value};
-use serde::{Deserialize, Serialize};
+use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -71,17 +73,27 @@ impl InstanceConfig {
             }
         }
 
-        if let Ok(looking_glass) = config.get_table("looking-glass") {
-            instance_config.looking_glass =
-                LookingGlassConfig::from_table(looking_glass, &instance_config.name)?;
-        }
+        instance_config.looking_glass = LookingGlassConfig::from_table(
+            config.get_table("looking-glass").unwrap_or_default(),
+            &instance_config.name,
+        )?;
+        instance_config.scream = ScreamConfig::from_table(
+            config.get_table("scream").unwrap_or_default(),
+            &instance_config.name,
+        )?;
+        instance_config.spice =
+            SpiceConfig::from_table(config.get_table("spice").unwrap_or_default())?;
 
-        if let Ok(scream) = config.get_table("scream") {
-            instance_config.scream = ScreamConfig::from_table(scream, &instance_config.name)?;
-        }
-
-        if let Ok(scream) = config.get_table("spice") {
-            instance_config.spice = SpiceConfig::from_table(scream)?;
+        if let Ok(features) = config.get::<Vec<String>>("machine.features") {
+            for feature in features {
+                match feature.as_str() {
+                    "looking-glass" => instance_config.looking_glass.enabled = true,
+                    "spice" => instance_config.spice.enabled = true,
+                    "scream" => instance_config.scream.enabled = true,
+                    "uefi" => instance_config.uefi.enabled = true,
+                    _ => {}
+                }
+            }
         }
 
         Ok(instance_config)
@@ -432,7 +444,7 @@ impl DiskConfig {
             path,
         };
 
-        // TODO: Add blockdev details
+        // TODO: Add block dev details
 
         Ok(disk)
     }
@@ -440,20 +452,141 @@ impl DiskConfig {
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct VfioConfig {
-    pub slot: String,
+    pub address: PCIAddress,
+    pub vendor: Option<u32>,
+    pub device: Option<u32>,
+    pub index: u32,
     pub graphics: bool,
     pub multifunction: bool,
 }
 
+pub fn read_pci_ids(addr: &PCIAddress) -> Result<(u32, u32), anyhow::Error> {
+    let device = std::fs::read_to_string(format!("/sys/bus/pci/devices/{:#}/device", addr))
+        .with_context(|| {
+            format!(
+                "Failed to read the device id of PCI device at {:#} ({})",
+                addr,
+                format!("/sys/bus/pci/devices/{:#}/device", addr)
+            )
+        })?;
+    let found_device = u32::from_str_radix(device.trim_start_matches("0x").trim_end(), 16)?;
+
+    let vendor = std::fs::read_to_string(format!("/sys/bus/pci/devices/{:#}/vendor", addr))
+        .with_context(|| {
+            format!(
+                "Failed to read the vendor id of PCI device at {:#} ({})",
+                addr,
+                format!("/sys/bus/pci/devices/{:#}/vendor", addr)
+            )
+        })?;
+    let found_vendor = u32::from_str_radix(vendor.trim_start_matches("0x").trim_end(), 16)?;
+
+    Ok((found_vendor, found_device))
+}
+
 impl VfioConfig {
     pub fn from_table(table: HashMap<String, Value>) -> Result<VfioConfig, anyhow::Error> {
-        let slot = table
-            .get("slot")
+        let mut address = table
+            .get("addr")
+            .or_else(|| table.get("address"))
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("vfio table needs a slot"))?
-            .into_str()?;
+            .map(|x| PCIAddress::from_str(&x.into_str()?))
+            .transpose()?;
+
+        let vendor = table
+            .get("vendor")
+            .cloned()
+            .map(|x| x.into_int().map(|x| x as u32))
+            .transpose()?;
+        let device = table
+            .get("device")
+            .cloned()
+            .map(|x| x.into_int().map(|x| x as u32))
+            .transpose()?;
+        let index = table
+            .get("index")
+            .cloned()
+            .map(|x| x.into_int().map(|x| x as u32))
+            .transpose()?
+            .unwrap_or(0);
+
+        let address = match (address, vendor, device) {
+            (Some(addr), vendor, device) => {
+                let (found_vendor, found_device) = read_pci_ids(&addr)?;
+
+                if let Some(device) = device {
+                    if device != found_device {
+                        anyhow::bail!(
+                            "VFIO expects a PCI device on address {} with the device id {:#04x} but found the id {:#04x} instead",
+                            addr,
+                            device,
+                            found_device
+                        )
+                    }
+                }
+
+                if let Some(vendor) = vendor {
+                    if vendor != found_vendor {
+                        anyhow::bail!(
+                            "VFIO expects a PCI device on address {} with the vendor id {:#04x} but found the id {:#04x} instead",
+                            addr,
+                            vendor,
+                            found_vendor
+                        )
+                    }
+                }
+
+                addr
+            }
+
+            (None, Some(vendor), Some(device)) => {
+                let mut counter = index;
+                let mut items: Vec<(PCIAddress, u32, u32)> = vec![];
+
+                for entry in std::fs::read_dir("/sys/bus/pci/devices")? {
+                    let entry = entry?;
+                    let file_name = entry.file_name();
+                    let addr_name = file_name
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("Failed to parse PCI device name"))?;
+                    let addr = PCIAddress::from_str(addr_name)?;
+                    let (found_vendor, found_device) = read_pci_ids(&addr)?;
+                    items.push((addr, found_vendor, found_device));
+                }
+
+                items.sort_by_key(|&(addr, _, _)| addr);
+
+                for (addr, found_vendor, found_device) in items {
+                    if found_vendor == vendor && found_device == device {
+                        if counter == 0 {
+                            address = Some(addr);
+                            break;
+                        }
+
+                        counter -= 1;
+                    }
+                }
+
+                if let Some(address) = address {
+                    address
+                } else {
+                    anyhow::bail!(
+                        "Can't find {}th PCI device with vendor id {:#04x} and device id {:#04x}",
+                        index + 1,
+                        vendor,
+                        device
+                    )
+                }
+            }
+
+            _ => anyhow::bail!("VFIO element needs either vendor and device or address to be set"),
+        };
+
         let mut cfg = VfioConfig {
-            slot,
+            address,
+            vendor: None,
+            device: None,
+            index: 0,
             graphics: false,
             multifunction: false,
         };
@@ -488,5 +621,136 @@ impl SpiceConfig {
         }
 
         Ok(cfg)
+    }
+}
+
+#[derive(Default, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct PCIAddress {
+    domain: u32,
+    bus: u8,
+    slot: u8,
+    func: u8,
+}
+
+impl<'de> Deserialize<'de> for PCIAddress {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct X;
+        impl Visitor<'_> for X {
+            type Value = String;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("Expecting a string")
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(v)
+            }
+        }
+
+        let x = deserializer.deserialize_string(X)?;
+        Ok(PCIAddress::from_str(&x).map_err(|x| de::Error::custom(x))?)
+    }
+}
+
+impl Serialize for PCIAddress {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl PCIAddress {
+    fn to_string(&self) -> String {
+        format!(
+            "{:04x}:{:02x}:{:02x}.{:x}",
+            self.domain, self.bus, self.slot, self.func
+        )
+    }
+}
+
+impl Debug for PCIAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PCIAddress(")?;
+        if f.alternate() && self.domain == 0 {
+            f.write_str(&format!("{:04x}:", self.domain))?;
+        }
+
+        f.write_str(&format!(
+            "{:02x}:{:02x}.{:x}",
+            self.bus, self.slot, self.func
+        ))?;
+        f.write_str(")")
+    }
+}
+
+impl Display for PCIAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if f.alternate() && self.domain == 0 {
+            f.write_str(&format!("{:04x}:", self.domain))?;
+        }
+
+        f.write_str(&format!(
+            "{:02x}:{:02x}.{:x}",
+            self.bus, self.slot, self.func
+        ))
+    }
+}
+
+impl FromStr for PCIAddress {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut rev = s.rsplit(":");
+        let mut addr = PCIAddress::default();
+
+        if let Some(slot_and_func) = rev.next() {
+            let mut splitter = slot_and_func.split(".");
+
+            if let Some(slot) = splitter.next() {
+                addr.slot = u8::from_str_radix(slot, 16)?;
+            }
+
+            if let Some(func) = splitter.next() {
+                addr.func = u8::from_str_radix(func, 16)?;
+            }
+        }
+
+        if let Some(bus) = rev.next() {
+            addr.bus = u8::from_str_radix(bus, 16)?;
+        }
+
+        if let Some(domain) = rev.next() {
+            addr.domain = u32::from_str_radix(domain, 16)?;
+        }
+
+        Ok(addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::PCIAddress;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_input_and_output_are_same() {
+        assert_eq!(
+            PCIAddress::from_str("0000:00:00.1")
+                .expect("Failed to parse correct string")
+                .to_string(),
+            "0000:00:00.1"
+        );
+
+        assert_eq!(
+            PCIAddress::from_str("0000:00:01.0")
+                .expect("Failed to parse correct string")
+                .to_string(),
+            "0000:00:01.0"
+        );
     }
 }

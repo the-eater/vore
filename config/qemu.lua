@@ -45,12 +45,8 @@ end
 
 vore:set_build_command(function(instance, vm)
   vm:arg("-rtc", "driftfix=slew")
-  --vm:arg("-mon", "stdio")
   vm:arg("-no-hpet")
   vm:arg("-boot", "strict=on")
-
-  vm:arg("-chardev", "socket,id=charmonitor,path=/tmp/qemu.sock,server=on,wait=off")
-  vm:arg("-mon", "chardev=charmonitor,id=monitor,mode=readline")
 
   if instance.kvm then
     vm:arg("-enable-kvm")
@@ -61,7 +57,7 @@ vore:set_build_command(function(instance, vm)
   end
 
   --this disables the QEMU GUI
-  --vm:arg("-display", "none")
+  vm:arg("-display", "none")
 
   vm:arg("-no-user-config")
   --vm:arg("-nodefaults")
@@ -101,7 +97,7 @@ vore:set_build_command(function(instance, vm)
   end
 
   for _, vfio in ipairs(instance.vfio) do
-    local def = "vfio-pci,host=" .. vfio.slot
+    local def = "vfio-pci,host=" .. vfio.address
     if vfio.graphics then
       def = def .. ",x-vga=on"
     end
@@ -146,6 +142,7 @@ end)
 ---@param type string
 ---@return fun(vm: VM, idx: number, disk: Disk): VM
 function scsi_disk_gen(type)
+  -- see https://blog.christophersmart.com/2019/12/18/kvm-guests-with-emulated-ssd-and-nvme-drives/
   return function(vm, idx, disk)
     vm:arg(
       "-blockdev",
@@ -185,3 +182,12 @@ end
 
 vore:register_disk_preset("ssd", scsi_disk_gen("ssd"))
 vore:register_disk_preset("hdd", scsi_disk_gen("hdd"))
+vore:register_disk_preset("nvme", function(vm, _, disk)
+  local nvme_id = vm:get_counter("nvme", 1)
+
+  -- see https://blog.christophersmart.com/2019/12/18/kvm-guests-with-emulated-ssd-and-nvme-drives/
+  vm:arg("-drive", "file=" .. disk.path .. ",driver=raw,if=none,id=NVME" .. nvme_id)
+  vm:arg("-device", "nvme,drive=NVME" .. nvme_id .. ",serial=nvme-" .. nvme_id)
+
+  return vm
+end)
