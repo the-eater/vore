@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.40"
 vore-core = { path = "../vore-core" }
+polling = "2.0.3"

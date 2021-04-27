@@ -167,8 +167,8 @@ impl UserData for VoreLuaWeakStorage {
 
         methods.add_method(
             "add_disk",
-            |lua, weak, args: (VM, u64, mlua::Table)| -> Result<Value, mlua::Error> {
-                let (arg_list, index, disk): (VM, u64, Table) = args;
+            |lua, weak, args: (VM, mlua::Table, u64, mlua::Table)| -> Result<Value, mlua::Error> {
+                let (vm, instance, index, disk): (VM, mlua::Table, u64, Table) = args;
                 let function = {
                     let strong = weak
                         .0
@@ -195,7 +195,7 @@ impl UserData for VoreLuaWeakStorage {
                     lua.registry_value::<Function>(key)?
                 };
 
-                function.call((arg_list, index, disk))
+                function.call((vm, instance, index, disk))
             },
         )
     }

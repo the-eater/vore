@@ -1,11 +1,11 @@
 use crate::{GlobalConfig, InstanceConfig, QemuCommandBuilder};
 use anyhow::{Context, Error};
 use beau_collector::BeauCollector;
-use qapi::qmp::QMP;
-use qapi::Qmp;
-use std::fmt;
+use qapi::qmp::{QMP, Event};
+use qapi::{Qmp, ExecuteError};
+use std::{fmt, mem};
 use std::fmt::{Debug, Formatter};
-use std::fs::{read_link, OpenOptions};
+use std::fs::{read_link, OpenOptions, read_dir};
 use std::io;
 use std::io::{BufReader, ErrorKind, Read, Write};
 use std::option::Option::Some;
@@ -14,11 +14,23 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::result::Result::Ok;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use qapi_qmp::QmpCommand;
+use std::str::FromStr;
+use libc::{cpu_set_t, CPU_SET, sched_setaffinity};
+use crate::cpu_list::CpuList;
+
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub enum VirtualMachineState {
+    Stopped,
+    Paused,
+    Running,
+}
 
 #[derive(Debug)]
 pub struct VirtualMachine {
     working_dir: PathBuf,
+    state: VirtualMachineState,
     config: InstanceConfig,
     global_config: GlobalConfig,
     process: Option<Child>,
@@ -28,7 +40,7 @@ pub struct VirtualMachine {
 struct ControlSocket {
     unix_stream: CloneableUnixStream,
     qmp: Qmp<qapi::Stream<BufReader<CloneableUnixStream>, CloneableUnixStream>>,
-    info: QMP,
+    _info: QMP,
 }
 
 impl Debug for ControlSocket {
@@ -49,6 +61,7 @@ impl VirtualMachine {
     ) -> VirtualMachine {
         VirtualMachine {
             working_dir,
+            state: VirtualMachineState::Stopped,
             config,
             global_config: global_config.clone(),
             process: None,
@@ -90,7 +103,27 @@ impl VirtualMachine {
     /// And binding them to vfio-pci
     ///
     /// With [execute_fixes] set to false, it will only check if everything is sane, and the correct driver is loaded
+    ///
+    /// [force] can be given to auto-bind PCI devices that are blacklisted anyway. this can result in vore indefinitely hanging.
     fn prepare_vfio(&mut self, execute_fixes: bool, force: bool) -> Vec<Result<(), Error>> {
+        if self.config.vfio.is_empty() {
+            return vec![];
+        }
+
+        match Command::new("modprobe")
+            .arg("vfio-pci")
+            .spawn()
+            .and_then(|mut x| x.wait())
+        {
+            Err(err) => return vec![Err(err.into())],
+            Ok(x) if !x.success() => {
+                return vec![Err(anyhow::anyhow!(
+                    "Failed to load vfio-pci kernel module. can't use VFIO"
+                ))];
+            }
+            Ok(_) => {}
+        }
+
         self.config.vfio.iter().map(|vfio| {
             let pci_driver_path = format!("/sys/bus/pci/devices/{:#}/driver", vfio.address);
 
@@ -133,6 +166,7 @@ impl VirtualMachine {
                 let address = format!("{:#}\n", vfio.address).into_bytes();
 
                 if !driver.is_empty() {
+                    // Unbind the PCI device from the current driver
                     let mut unbind = std::fs::OpenOptions::new().append(true).open(format!(
                         "/sys/bus/pci/devices/{:#}/driver/unbind",
                         vfio.address
@@ -142,6 +176,7 @@ impl VirtualMachine {
                 }
 
                 {
+                    // Set a driver override
                     let mut driver_override = OpenOptions::new().append(true).open(format!(
                         "/sys/bus/pci/devices/{:#}/driver_override",
                         vfio.address
@@ -150,10 +185,13 @@ impl VirtualMachine {
                     driver_override.write_all(b"vfio-pci\n")?;
                 }
 
-                let mut probe = OpenOptions::new()
-                    .append(true)
-                    .open("/sys/bus/pci/drivers_probe")?;
-                probe.write_all(&address)?;
+                {
+                    // Probe the PCI device so the driver override is picked up
+                    let mut probe = OpenOptions::new()
+                        .append(true)
+                        .open("/sys/bus/pci/drivers_probe")?;
+                    probe.write_all(&address)?;
+                }
 
                 let new_link = read_link(&pci_driver_path)?;
                 if !new_link.ends_with("vfio-pci") {
@@ -171,12 +209,184 @@ impl VirtualMachine {
         builder.build(&self.config)
     }
 
-    pub fn pin_qemu_threads(&self) {
+    pub fn pin_qemu_threads(&self) -> Result<(), anyhow::Error> {
         let pid = if let Some(child) = &self.process {
             child.id()
         } else {
-            return;
+            return Ok(());
         };
+
+        let list = CpuList::adjacent(self.config.cpu.amount as usize);
+        if list.is_none() {
+            // If we are over provisioning CPU's there's not much use to pinning
+            return Ok(());
+        }
+
+        let list = list.unwrap();
+
+        let mut kvm_threads = vec![];
+        for item in read_dir(format!("/proc/{}/task", pid))? {
+            let entry = item?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let res = entry.file_name().to_str().ok_or_else(|| anyhow::anyhow!("")).and_then(|x| usize::from_str(x).map_err(From::from));
+            if res.is_err() {
+                continue;
+            }
+
+            let tid = res.unwrap();
+            let name = entry.path().join("comm");
+            let comm = std::fs::read_to_string(name)?;
+            if comm.starts_with("CPU ") {
+                let nr = comm.chars().skip(4).take_while(|x| x.is_ascii_digit()).collect::<String>();
+                let cpu_id = usize::from_str(&nr).unwrap();
+                kvm_threads.push((tid, cpu_id));
+            }
+        }
+
+        for (tid, cpu_id) in kvm_threads {
+            if cpu_id >= list.len() {
+                // ???
+                continue;
+            }
+
+            let cpu = &list[cpu_id];
+            unsafe {
+                let mut set = mem::zeroed::<cpu_set_t>();
+                CPU_SET(cpu.id, &mut set);
+                sched_setaffinity(tid as i32, mem::size_of::<cpu_set_t>(), &set);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_qmp_events(&mut self) -> Result<(), anyhow::Error> {
+        let events = if let Some(qmp) = self.control_socket.as_mut() {
+            // While we could iter, we keep hold of the mutable reference, so it's easier to just collect the events
+            qmp.qmp.events().collect::<Vec<_>>()
+        } else {
+            return Ok(());
+        };
+
+        for event in events {
+            println!("Event: {:?}", event);
+
+            match event {
+                Event::STOP { .. } => {
+                    if self.state != VirtualMachineState::Stopped {
+                        self.state = VirtualMachineState::Paused;
+                    }
+                }
+                Event::RESUME { .. } => {
+                    self.state = VirtualMachineState::Running;
+                }
+                Event::SHUTDOWN { .. } => {
+                    self.state = VirtualMachineState::Stopped;
+                }
+
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn pause(&mut self) -> Result<(), anyhow::Error> {
+        if self.state != VirtualMachineState::Running {
+            return Ok(());
+        }
+
+        self.send_qmp_command(&qapi_qmp::stop {})?;
+
+        Ok(())
+    }
+
+    fn send_qmp_command<C: QmpCommand>(&mut self, command: &C) -> Result<C::Ok, anyhow::Error> {
+        let res = if let Some(qmp) = self.control_socket.as_mut() {
+            qmp.qmp.execute(command)?
+        } else {
+            anyhow::bail!("No control socket available")
+        };
+
+        self.process_qmp_events()?;
+        Ok(res)
+    }
+
+    pub fn stop(&mut self) -> Result<(), anyhow::Error> {
+        if self.process.is_none() || self.control_socket.is_none() || self.state == VirtualMachineState::Stopped {
+            return Ok(());
+        }
+
+        self.send_qmp_command(&qapi_qmp::system_powerdown {})?;
+        Ok(())
+    }
+
+    pub fn stop_now(&mut self) -> Result<(), anyhow::Error> {
+        self.stop()?;
+
+        if let Some(mut process) = self.process.take() {
+            self.wait(Some(Duration::from_secs(30)), VirtualMachineState::Stopped)?;
+            self.quit()?;
+            process.wait()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn wait_till_stopped(&mut self) -> Result<(), anyhow::Error> {
+        self.wait(None, VirtualMachineState::Stopped)?;
+        Ok(())
+    }
+
+    pub fn quit(&mut self) -> Result<(), anyhow::Error> {
+        if self.control_socket.is_none() {
+            return Ok(());
+        }
+
+        self.send_qmp_command(&qapi_qmp::quit {})
+            .map(|_| ())
+            .or_else(|x|
+                if let Some(ExecuteError::Io(err)) = x.downcast_ref::<ExecuteError>() {
+                    if err.kind() == ErrorKind::UnexpectedEof {
+                        Ok(())
+                    } else {
+                        Err(x)
+                    }
+                } else {
+                    Err(x)
+                })
+            .map_err(From::from)
+    }
+
+    fn wait(&mut self, duration: Option<Duration>, target_state: VirtualMachineState) -> Result<bool, anyhow::Error> {
+        let start = Instant::now();
+        while duration.map_or(true, |dur| (Instant::now() - start) < dur) {
+            let has_socket = self.control_socket.as_mut()
+                .map(|x| x.qmp.nop())
+                .transpose()?
+                .is_some();
+
+            if !has_socket {
+                return Ok(self.state == target_state);
+            }
+
+            self.process_qmp_events()?;
+
+            if self.state == target_state {
+                return Ok(true);
+            }
+
+            if duration.is_some() {
+                std::thread::sleep(Duration::from_millis(500));
+            } else {
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
+
+        Ok(self.state == target_state)
     }
 
     pub fn start(&mut self) -> Result<(), anyhow::Error> {
@@ -192,7 +402,6 @@ impl VirtualMachine {
 
         let mut res = || {
             let qemu_control_socket = format!("{}/qemu.sock", self.working_dir.to_str().unwrap());
-
             let mut unix_stream = UnixStream::connect(&qemu_control_socket);
             let mut time = 30;
             while let Err(err) = unix_stream {
@@ -205,6 +414,13 @@ impl VirtualMachine {
 
                 std::thread::sleep(Duration::from_secs(1));
                 unix_stream = UnixStream::connect(&qemu_control_socket);
+
+                if let Some(proc) = self.process.as_mut() {
+                    if let Some(_) = proc.try_wait()? {
+                        anyhow::bail!("QEMU quit early")
+                    }
+                }
+
                 time -= 1;
             }
 
@@ -217,10 +433,10 @@ impl VirtualMachine {
             let mut control_socket = ControlSocket {
                 unix_stream,
                 qmp,
-                info: handshake,
+                _info: handshake,
             };
 
-            self.pin_qemu_threads();
+            // self.pin_qemu_threads()?;
 
             control_socket
                 .qmp
@@ -228,12 +444,9 @@ impl VirtualMachine {
                 .context("Failed to send start command on qemu control socket")?;
 
             control_socket.qmp.nop()?;
-
-            while let Some(event) = control_socket.qmp.events().next() {
-                println!("event: {:?}", event);
-            }
-
             self.control_socket = Some(control_socket);
+
+            self.process_qmp_events()?;
 
             Ok(())
         };

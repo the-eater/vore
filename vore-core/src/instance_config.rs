@@ -381,7 +381,7 @@ impl LookingGlassConfig {
         if let Some(mem_path) = table.get("mem-path").cloned() {
             cfg.mem_path = mem_path.into_str()?;
         } else {
-            cfg.mem_path = format!("/dev/shm/{}-looking-glass", name);
+            cfg.mem_path = format!("/dev/shm/{}/looking-glass", name);
         }
 
         match (table.get("buffer-size").cloned(), table.get("width").cloned(), table.get("height").cloned()) {
@@ -415,6 +415,7 @@ pub struct DiskConfig {
     pub disk_type: String,
     pub preset: String,
     pub path: String,
+    pub read_only: bool,
 }
 
 impl DiskConfig {
@@ -430,21 +431,30 @@ impl DiskConfig {
             disk_type.into_str()?
         } else {
             (kiam::when! {
-                path.starts_with("/dev") => "raw",
+                path.starts_with("/dev") | path.ends_with(".iso") => "raw",
                 path.ends_with(".qcow2") => "qcow2",
                 _ => return Err(anyhow::Error::msg("Can't figure out from path what type of disk driver should be used"))
             }).to_string()
         };
 
-        let preset = table.get("preset").cloned().context("gamer")?.into_str()?;
+        let preset = table.get("preset")
+            .cloned()
+            .context("Every disk should have a preset set")?
+            .into_str()?;
+
+        let read_only = table.get("read-only")
+            .cloned()
+            .map(|x| x.into_bool())
+            .transpose()
+            .context("Failed to read read-only as boolean from config")?
+            .unwrap_or(false);
 
         let disk = DiskConfig {
             disk_type,
             preset,
             path,
+            read_only,
         };
-
-        // TODO: Add block dev details
 
         Ok(disk)
     }
@@ -634,8 +644,8 @@ pub struct PCIAddress {
 
 impl<'de> Deserialize<'de> for PCIAddress {
     fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
-    where
-        D: Deserializer<'de>,
+        where
+            D: Deserializer<'de>,
     {
         struct X;
         impl Visitor<'_> for X {
@@ -657,8 +667,8 @@ impl<'de> Deserialize<'de> for PCIAddress {
 
 impl Serialize for PCIAddress {
     fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
-    where
-        S: Serializer,
+        where
+            S: Serializer,
     {
         serializer.serialize_str(&self.to_string())
     }

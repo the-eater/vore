@@ -86,7 +86,7 @@ vore:set_build_command(function(instance, vm)
   end
 
   for idx, disk in ipairs(instance.disks) do
-    vm = vore:add_disk(vm, idx, disk)
+    vm = vore:add_disk(vm, instance, idx, disk)
   end
 
   if instance.uefi.enabled then
@@ -140,14 +140,20 @@ end)
 
 ---
 ---@param type string
----@return fun(vm: VM, idx: number, disk: Disk): VM
-function scsi_disk_gen(type)
+---@return fun(vm: VM, instance: Instance, idx: number, disk: Disk): VM
+function virtio_scsi_disk_gen(type)
   -- see https://blog.christophersmart.com/2019/12/18/kvm-guests-with-emulated-ssd-and-nvme-drives/
-  return function(vm, idx, disk)
+  return function(vm, _, idx, disk)
+    local scsi_pci = vm:get_device_id("virtio-scsi-pci")
+    if scsi_pci == nil then
+      scsi_pci = "scsi-pci"
+      vm:arg("-device", "virtio-scsi-pci,id=" .. scsi_pci)
+    end
+
     vm:arg(
       "-blockdev",
       tojson({
-        ["driver"] = "raw",
+        ["driver"] = disk.disk_type,
         ["file"] = {
           ["driver"] = "host_device",
           ["filename"] = disk.path,
@@ -162,12 +168,6 @@ function scsi_disk_gen(type)
       })
     )
 
-    local scsi_pci = vm:get_device_id("virtio-scsi-pci")
-    if scsi_pci == nil then
-      scsi_pci = "scsi-pci"
-      vm:arg("-device", "virtio-scsi-pci,id=" .. scsi_pci)
-    end
-
     local hd = "scsi-hd,drive=format-" .. idx .. ",bus=" .. scsi_pci .. ".0"
     if type == "ssd" then
       -- Having a rotation rate of 1 signals Windows it's an ssd
@@ -180,13 +180,32 @@ function scsi_disk_gen(type)
   end
 end
 
-vore:register_disk_preset("ssd", scsi_disk_gen("ssd"))
-vore:register_disk_preset("hdd", scsi_disk_gen("hdd"))
-vore:register_disk_preset("nvme", function(vm, _, disk)
+---
+---@param name string
+---@param device_type string
+---@return fun(vm: VM, instance: Instance, idx: number, disk: Disk): VM
+function ide_disk_gen(name, device_type)
+  return function(vm, _, _, disk)
+    local drive_id = name .. vm:get_counter(name, 1)
+
+    vm:arg("-drive", "file=" .. disk.path .. ",driver=" .. disk.disk_type .. ",if=none,id=" .. drive_id)
+    vm:arg("-device", device_type .. ",drive=" .. drive_id .. ",bus=ide." .. vm:get_counter("ide", 0))
+
+    return vm
+  end
+end
+
+vore:register_disk_preset("ssd", virtio_scsi_disk_gen("ssd"))
+vore:register_disk_preset("hdd", virtio_scsi_disk_gen("hdd"))
+
+vore:register_disk_preset("iso", ide_disk_gen("iso", "ide-cd"))
+vore:register_disk_preset("ide", ide_disk_gen("ide", "ide-hd"))
+
+vore:register_disk_preset("nvme", function(vm, _, _, disk)
   local nvme_id = vm:get_counter("nvme", 1)
 
   -- see https://blog.christophersmart.com/2019/12/18/kvm-guests-with-emulated-ssd-and-nvme-drives/
-  vm:arg("-drive", "file=" .. disk.path .. ",driver=raw,if=none,id=NVME" .. nvme_id)
+  vm:arg("-drive", "file=" .. disk.path .. ",driver=" .. disk.disk_type .. ",if=none,id=NVME" .. nvme_id)
   vm:arg("-device", "nvme,drive=NVME" .. nvme_id .. ",serial=nvme-" .. nvme_id)
 
   return vm

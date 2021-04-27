@@ -100,16 +100,17 @@ end
 ----
 ---Add a disk definition to the argument list
 ---@param vm VM
+---@param instance Instance
 ---@param index number
 ---@param disk Disk
 ---@return VM
-function vore:add_disk(vm, index, disk)
+function vore:add_disk(vm, instance, index, disk)
 end
 
 ----
 ---Register a disk preset
 ---@param name string
----@param cb fun(vm: VM, idx: number, disk: Disk): VM
+---@param cb fun(vm: VM, instance: Instance, idx: number, disk: Disk): VM
 function vore:register_disk_preset(name, cb)
 end
 

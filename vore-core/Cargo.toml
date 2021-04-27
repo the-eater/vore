@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-config = "0.11.0"
+config = { version = "0.11.0", default-features = false, features = ["toml"] }
 serde = { version = "1.0.125", features = ["serde_derive"] }
 serde_json = "1.0.64"
 toml = "*"
@@ -18,3 +18,4 @@ beau_collector = "0.2.1"
 qapi-qmp = "0.7.0"
 qapi = { version = "0.7.0", features = ["qapi-qmp"] }
 libc = "0.2.94"
+lazy_static = "1.4.0"
