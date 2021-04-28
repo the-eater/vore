@@ -4,13 +4,13 @@ use beau_collector::BeauCollector;
 use qapi::qmp::{QMP, Event};
 use qapi::{Qmp, ExecuteError};
 use std::{fmt, mem};
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Formatter, Display};
 use std::fs::{read_link, OpenOptions, read_dir};
 use std::io;
 use std::io::{BufReader, ErrorKind, Read, Write};
 use std::option::Option::Some;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::process::{Child, Command};
 use std::result::Result::Ok;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,12 +19,37 @@ use qapi_qmp::QmpCommand;
 use std::str::FromStr;
 use libc::{cpu_set_t, CPU_SET, sched_setaffinity};
 use crate::cpu_list::CpuList;
+use std::os::unix::prelude::AsRawFd;
+use serde::{Deserialize, Serialize};
 
-#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+#[derive(Eq, PartialEq, Copy, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VirtualMachineState {
+    Loaded,
+    Prepared,
     Stopped,
     Paused,
     Running,
+}
+
+impl Display for VirtualMachineState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            VirtualMachineState::Loaded => write!(f, "loaded"),
+            VirtualMachineState::Prepared => write!(f, "prepared"),
+            VirtualMachineState::Stopped => write!(f, "stopped"),
+            VirtualMachineState::Paused => write!(f, "paused"),
+            VirtualMachineState::Running => write!(f, "running")
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VirtualMachineInfo {
+    pub name: String,
+    pub working_dir: PathBuf,
+    pub config: InstanceConfig,
+    pub state: VirtualMachineState,
 }
 
 #[derive(Debug)]
@@ -54,18 +79,31 @@ impl Debug for ControlSocket {
 const AUTO_UNBIND_BLACKLIST: &[&str] = &["nvidia"];
 
 impl VirtualMachine {
-    pub fn new(
+    pub fn new<P: AsRef<Path>>(
         config: InstanceConfig,
         global_config: &GlobalConfig,
-        working_dir: PathBuf,
+        working_dir: P,
     ) -> VirtualMachine {
         VirtualMachine {
-            working_dir,
-            state: VirtualMachineState::Stopped,
+            working_dir: working_dir.as_ref().to_path_buf(),
+            state: VirtualMachineState::Loaded,
             config,
             global_config: global_config.clone(),
             process: None,
             control_socket: None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.config.name
+    }
+
+    pub fn info(&self) -> VirtualMachineInfo {
+        VirtualMachineInfo {
+            name: self.name().to_string(),
+            working_dir: self.working_dir.clone(),
+            config: self.config.clone(),
+            state: self.state,
         }
     }
 
@@ -77,6 +115,10 @@ impl VirtualMachine {
             .into_iter()
             .bcollect::<()>()
             .with_context(|| format!("Failed to prepare VM {}", self.config.name))?;
+
+        if self.state == VirtualMachineState::Loaded {
+            self.state = VirtualMachineState::Prepared;
+        }
         Ok(())
     }
 
@@ -424,8 +466,7 @@ impl VirtualMachine {
                 time -= 1;
             }
 
-            let unix_stream = unix_stream.unwrap();
-            let unix_stream = CloneableUnixStream(Arc::new(Mutex::new(unix_stream)));
+            let unix_stream = CloneableUnixStream::new(unix_stream.unwrap());
             let mut qmp = Qmp::from_stream(unix_stream.clone());
 
             let handshake = qmp.handshake()?;
@@ -461,12 +502,20 @@ impl VirtualMachine {
 
         result_
     }
+
+    pub fn control_stream(&self) -> Option<&CloneableUnixStream> {
+        self.control_socket.as_ref().map(|x| &x.unix_stream)
+    }
 }
 
 #[derive(Clone, Debug)]
-struct CloneableUnixStream(Arc<Mutex<UnixStream>>);
+pub struct CloneableUnixStream(Arc<Mutex<UnixStream>>);
 
 impl CloneableUnixStream {
+    pub fn new(unix_stream: UnixStream) -> CloneableUnixStream {
+        CloneableUnixStream(Arc::new(Mutex::new(unix_stream)))
+    }
+
     pub fn lock(&self) -> Result<MutexGuard<'_, UnixStream>, std::io::Error> {
         self.0.lock().map_err(|_| {
             io::Error::new(
@@ -477,12 +526,15 @@ impl CloneableUnixStream {
     }
 }
 
+impl AsRawFd for CloneableUnixStream {
+    fn as_raw_fd(&self) -> i32 {
+        self.lock().unwrap().as_raw_fd()
+    }
+}
+
 impl Read for CloneableUnixStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let res = self.lock()?.read(buf);
-        if let Ok(size) = res {
-            println!("READ: {}", String::from_utf8_lossy(&buf[..size]));
-        }
         res
     }
 }

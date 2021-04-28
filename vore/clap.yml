@@ -1,0 +1,122 @@
+name: "vore"
+about: "vored management interface"
+author: "eater <=eater.me>"
+
+args:
+  - vored-socket:
+      global: true
+      help: "Connect to the specified socket"
+      required: false
+      takes_value: true
+      default_value: "/run/vore.sock"
+      long: conn
+      short: c
+
+settings:
+  - SubcommandRequiredElseHelp
+  - GlobalVersion
+
+subcommands:
+  - daemon:
+      visible_alias: d
+      setting: SubcommandRequiredElseHelp
+      about: "Daemon related commands"
+      subcommands:
+        - version:
+            about: "Get the version of the daemon"
+
+  - load:
+      about: "Load a new VM"
+      args: &loadvm
+        - vm-config:
+            required: true
+            takes_value: true
+        - cdrom:
+            help: "Attach a cdrom to this configuration"
+            long: cdrom
+            multiple: true
+            takes_value: true
+        - save:
+            help: "Save this VM configuration"
+            long: save
+            short: s
+  - prepare:
+      about: "Prepare a VM"
+      args:
+        - vm-name:
+            help: "VM to prepare, if not given the ONLY loaded instance will be used"
+            required: false
+            takes_value: true
+        - cdrom:
+            help: "Attach a cdrom to this vm when starting"
+            long: cdrom
+            multiple: true
+            takes_value: true
+  - boot:
+      about: "Load and boot a new VM"
+      args: *loadvm
+
+  - start:
+      about: "Start a VM"
+      args:
+        - vm-name:
+            help: "VM to start, if not given the ONLY loaded instance will be used"
+            takes_value: true
+        - cdrom:
+            help: "Attach a cdrom to this vm when starting"
+            long: cdrom
+            multiple: true
+            takes_value: true
+  - stop:
+      about: "Stop a VM"
+      args:
+        - vm-name:
+            help: "VM to stop, if not given the ONLY running instance will be used"
+            required: false
+            takes_value: true
+  - list:
+      about: "List loaded VMs"
+
+  - scream:
+      setting: SubcommandRequiredElseHelp
+      about: "Scream related actions"
+      subcommands:
+        - stop:
+            about: "Stop a running scream instance"
+            args:
+              - vm-name:
+                  help: "VM to start looking glass instance for, if not given the ONLY running instance will be used"
+                  required: false
+                  takes_value: true
+        - start:
+            about: "Start a scream instance"
+            args:
+              - vm-name:
+                  help: "VM to start looking glass instance for, if not given the ONLY running instance will be used"
+                  required: false
+                  takes_value: true
+
+
+  - looking-glass:
+      about: "Start a looking glass instance for a VM"
+      visible_alias: lg
+      args:
+        - vm-name:
+            help: "VM to start looking glass instance for, if not given the ONLY running instance will be used"
+            required: false
+            takes_value: true
+        - looking-glass-args:
+            help: "Arguments to pass to looking glass"
+            last: true
+            takes_value: true
+            require_delimiter: true
+            multiple: true
+
+  - x:
+      about: "Weird hidden actions"
+      setting: SubcommandRequiredElseHelp
+      subcommands:
+        - qemucmd:
+            about: "Print the qemu command that would run this vm"
+            args: *loadvm
+

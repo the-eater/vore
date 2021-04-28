@@ -1,4 +1,4 @@
-use crate::{GlobalConfig, InstanceConfig};
+use crate::{GlobalConfig, InstanceConfig, GLOBAL_CONFIG_LOCATION};
 use anyhow::Context;
 use mlua::prelude::LuaError;
 use mlua::{
@@ -8,8 +8,9 @@ use mlua::{
 use serde::ser::Error;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::{Arc, Mutex, Weak};
+use std::fs;
 
 #[derive(Debug, Default, Deserialize, Clone)]
 struct VM {
@@ -66,7 +67,7 @@ impl UserData for VM {
                     .and_modify(|x| *x += 1)
                     .or_insert(0)
             )
-            .to_lua(lua)
+                .to_lua(lua)
         });
 
         methods.add_method_mut("get_counter", |lua, this, args: (String, usize)| {
@@ -213,6 +214,7 @@ impl VoreLuaStorage {
 
 pub struct QemuCommandBuilder {
     lua: Lua,
+    script: String,
     storage: VoreLuaStorage,
 }
 
@@ -221,8 +223,11 @@ impl QemuCommandBuilder {
         global: &GlobalConfig,
         working_dir: PathBuf,
     ) -> Result<QemuCommandBuilder, anyhow::Error> {
+        let lua = Path::new(GLOBAL_CONFIG_LOCATION).join(&global.qemu.script);
+
         let builder = QemuCommandBuilder {
             lua: Lua::new(),
+            script: fs::read_to_string(lua)?,
             storage: VoreLuaStorage::new(working_dir),
         };
 
@@ -250,9 +255,8 @@ impl QemuCommandBuilder {
     }
 
     pub fn build(self, config: &InstanceConfig) -> Result<Vec<String>, anyhow::Error> {
-        // TODO: load correct script
         self.lua
-            .load(include_str!("../../config/qemu.lua"))
+            .load(&self.script)
             .eval::<()>()
             .context("Failed to run the configured qemu lua script")?;
 

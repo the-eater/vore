@@ -2,6 +2,8 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub const GLOBAL_CONFIG_LOCATION: &str = "/home/eater/projects/vored/config/global.toml";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GlobalConfig {
     pub qemu: GlobalQemuConfig,

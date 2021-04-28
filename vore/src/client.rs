@@ -1,0 +1,57 @@
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use vore_core::rpc::{CommandCenter, Request};
+use std::io::{BufReader, Write, BufRead};
+use vore_core::{CloneableUnixStream, VirtualMachineInfo};
+use vore_core::rpc::*;
+
+pub struct Client {
+    stream: CloneableUnixStream,
+    buf_reader: BufReader<CloneableUnixStream>,
+    center: CommandCenter,
+}
+
+impl Client {
+    pub fn connect<P: AsRef<Path>>(path: P) -> anyhow::Result<Client> {
+        let path = path.as_ref();
+        let stream = CloneableUnixStream::new(UnixStream::connect(path)?);
+        log::debug!("Connected to vore socket at {}", path.to_str().unwrap());
+
+        Ok(Client {
+            buf_reader: BufReader::new(stream.clone()),
+            stream,
+            center: Default::default(),
+        })
+    }
+
+    fn send<R: Request>(&mut self, request: R) -> anyhow::Result<R::Response> {
+        let (_, json) = self.center.write_command(request)?;
+        self.stream.write_all(json.as_bytes())?;
+        let mut response = String::new();
+        self.buf_reader.read_line(&mut response)?;
+        let (_, info) = CommandCenter::read_answer::<R>(&response)?;
+        Ok(info)
+    }
+
+    pub fn load_vm(&mut self, toml: &str, save: bool, cdroms: Vec<String>) -> anyhow::Result<VirtualMachineInfo> {
+        Ok(self.send(LoadRequest {
+            cdroms,
+            save,
+            toml: toml.to_string(),
+            working_directory: None,
+        })?.info)
+    }
+
+    pub fn list_vms(&mut self) -> anyhow::Result<Vec<VirtualMachineInfo>> {
+        Ok(self.send(ListRequest {})?.items)
+    }
+
+    pub fn host_version(&mut self) -> anyhow::Result<InfoResponse> {
+        self.send(InfoRequest {})
+    }
+
+    pub fn prepare(&mut self, vm: String, cdroms: Vec<String>) -> anyhow::Result<()> {
+        self.send(PrepareRequest { name: vm, cdroms })?;
+        Ok(())
+    }
+}

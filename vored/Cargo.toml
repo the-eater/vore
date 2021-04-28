@@ -10,3 +10,7 @@ edition = "2018"
 anyhow = "1.0.40"
 vore-core = { path = "../vore-core" }
 polling = "2.0.3"
+log = "0.4.14"
+pretty_env_logger = "0.3"
+signal-hook = { version = "0.3.8", features = ["iterator"] }
+libc = "0.2.94"
