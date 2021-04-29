@@ -223,11 +223,11 @@ impl QemuCommandBuilder {
         global: &GlobalConfig,
         working_dir: PathBuf,
     ) -> Result<QemuCommandBuilder, anyhow::Error> {
-        let lua = Path::new(GLOBAL_CONFIG_LOCATION).join(&global.qemu.script);
+        let lua = Path::new(GLOBAL_CONFIG_LOCATION).parent().unwrap().join(&global.qemu.script);
 
         let builder = QemuCommandBuilder {
             lua: Lua::new(),
-            script: fs::read_to_string(lua)?,
+            script: fs::read_to_string(&lua).with_context(|| format!("Failed to load lua qemu command build script ({:?})", lua))?,
             storage: VoreLuaStorage::new(working_dir),
         };
 

@@ -1,11 +1,13 @@
 mod client;
 
-use vore_core::{init_logging};
+use vore_core::{init_logging, VirtualMachineInfo};
 use crate::client::Client;
 use clap::{App, ArgMatches};
-use std::fs;
+use std::{fs, mem};
 use anyhow::Context;
 use std::option::Option::Some;
+use std::process::Command;
+use std::os::unix::process::CommandExt;
 
 fn main() {
     init_logging();
@@ -38,6 +40,18 @@ fn main_res() -> anyhow::Result<()> {
             vore.prepare(args)?;
         }
 
+        ("start", Some(args)) => {
+            vore.start(args)?;
+        }
+
+        ("stop", Some(args)) => {
+            vore.stop(args)?;
+        }
+
+        ("looking-glass", Some(args)) => {
+            vore.looking_glass(args)?;
+        }
+
         ("daemon", Some(args)) => {
             match args.subcommand() {
                 ("version", _) => {
@@ -60,7 +74,7 @@ fn main_res() -> anyhow::Result<()> {
 
 struct LoadVMOptions {
     config: String,
-    cdroms: Vec<String>,
+    cd_roms: Vec<String>,
     save: bool,
 }
 
@@ -71,7 +85,7 @@ fn get_load_vm_options(args: &ArgMatches) -> anyhow::Result<LoadVMOptions> {
 
     Ok(LoadVMOptions {
         config,
-        cdroms: args.values_of("cdrom").map_or(vec![], |x| x.map(|x| x.to_string()).collect::<Vec<_>>()),
+        cd_roms: args.values_of("cdrom").map_or(vec![], |x| x.map(|x| x.to_string()).collect::<Vec<_>>()),
         save: args.is_present("save"),
     })
 }
@@ -82,12 +96,17 @@ struct VoreApp {
 
 impl VoreApp {
     fn get_vm_name(&mut self, args: &ArgMatches) -> anyhow::Result<String> {
+        self.get_vm(args).map(|x| x.name)
+    }
+
+    pub fn get_vm(&mut self, args: &ArgMatches) -> anyhow::Result<VirtualMachineInfo> {
+        let mut items = self.client.list_vms()?;
         if let Some(vm_name) = args.value_of("vm-name") {
-            Ok(vm_name.to_string())
+            items.into_iter().find(|x| x.name == vm_name)
+                .with_context(|| format!("Couldn't find VM with the name '{}'", vm_name))
         } else {
-            let mut items = self.client.list_vms()?;
             match (items.len(), items.pop()) {
-                (amount, Some(x)) if amount == 1 => return Ok(x.name),
+                (amount, Some(x)) if amount == 1 => return Ok(x),
                 (0, None) => anyhow::bail!("There are no VM's loaded"),
                 _ => anyhow::bail!("Multiple VM's are loaded, please specify one"),
             }
@@ -103,7 +122,7 @@ impl VoreApp {
     fn load(&mut self, args: &ArgMatches) -> anyhow::Result<()> {
         let vm_options = get_load_vm_options(args)?;
 
-        let vm_info = self.client.load_vm(&vm_options.config, vm_options.save, vm_options.cdroms)?;
+        let vm_info = self.client.load_vm(&vm_options.config, vm_options.save, vm_options.cd_roms)?;
         log::info!("Loaded VM {}", vm_info.name);
         Ok(())
     }
@@ -121,6 +140,40 @@ impl VoreApp {
     fn prepare(&mut self, args: &ArgMatches) -> anyhow::Result<()> {
         let name = self.get_vm_name(args)?;
         self.client.prepare(name, args.values_of("cdrom").map_or(vec![], |x| x.map(|x| x.to_string()).collect::<Vec<_>>()))?;
+        Ok(())
+    }
+
+    fn start(&mut self, args: &ArgMatches) -> anyhow::Result<()> {
+        let name = self.get_vm_name(args)?;
+        self.client.start(name, args.values_of("cdrom").map_or(vec![], |x| x.map(|x| x.to_string()).collect::<Vec<_>>()))?;
+        Ok(())
+    }
+
+    fn looking_glass(mut self, args: &ArgMatches) -> anyhow::Result<()> {
+        let vm = self.get_vm(args)?;
+        if !vm.config.looking_glass.enabled {
+            anyhow::bail!("VM '{}' has no looking glass", vm.name);
+        }
+
+        let mut command = Command::new(std::env::var("LOOKING_GLASS").unwrap_or("looking-glass-client".to_string()));
+        if vm.config.spice.enabled {
+            command.args(&["-c", &vm.config.spice.socket_path, "-p", "0"]);
+        } else {
+            command.args(&["-s", "no"]);
+        }
+
+        command.args(&["-f", &vm.config.looking_glass.mem_path]);
+        command.args(args.values_of("looking-glass-args").map_or(vec![], |x| x.into_iter().collect::<Vec<_>>()));
+
+        mem::drop(self);
+        command.exec();
+
+        Ok(())
+    }
+
+    fn stop(&mut self, args: &ArgMatches) -> anyhow::Result<()> {
+        let name = self.get_vm_name(args)?;
+        self.client.stop(name)?;
         Ok(())
     }
 }

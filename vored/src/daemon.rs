@@ -95,7 +95,7 @@ impl RPCConnection {
 #[derive(Clone, Eq, PartialEq, Debug)]
 enum EventTarget {
     RPCListener,
-    _Machine(String),
+    Machine(String),
     RPCConnection(usize),
     None,
 }
@@ -236,14 +236,42 @@ impl Daemon {
 
                 rpc::PrepareResponse {}.into_enum()
             }
-            AllRequests::Start(_) => {
-                anyhow::bail!("Unimplemented");
+            AllRequests::Start(val) => {
+                let cloned = if let Some(machine) = self.machines.get_mut(&val.name) {
+                    machine.start()?;
+
+                    machine.control_stream().cloned()
+                } else {
+                    anyhow::bail!("No machine with the name {} exists", val.name);
+                };
+
+                if let Some(cloned) = cloned {
+                    let new_id = self.add_target(EventTarget::Machine(val.name.clone()));
+                    self.poller.add(&cloned, Event::readable(new_id))?;
+                }
+
+                rpc::StartResponse {}.into_enum()
             }
-            AllRequests::Stop(_) => {
-                anyhow::bail!("Unimplemented");
+            AllRequests::Stop(val) => {
+                if let Some(machine) = self.machines.get_mut(&val.name) {
+                    machine.stop()?;
+                } else {
+                    anyhow::bail!("No machine with the name {} exists", val.name);
+                }
+
+                rpc::StartResponse {}.into_enum()
             }
             AllRequests::Unload(_) => {
                 anyhow::bail!("Unimplemented");
+            }
+            AllRequests::Kill(val) => {
+                if let Some(machine) = self.machines.get_mut(&val.name) {
+                    machine.quit()?;
+                } else {
+                    anyhow::bail!("No machine with the name {} exists", val.name);
+                }
+
+                rpc::StartResponse {}.into_enum()
             }
         };
 
@@ -273,8 +301,12 @@ impl Daemon {
                         self.poller.modify(&self.rpc_listener, Event::readable(event.key))?;
                         self.accept_rpc_connections()?;
                     }
-                    EventTarget::_Machine(name) if self.machines.contains_key(&name) => {
-                        if let Some(control_socket) = self.machines[&name].control_stream() {
+                    EventTarget::Machine(name) if self.machines.contains_key(&name) => {
+                        if let Some(machine) = self.machines.get_mut(&name) {
+                            machine.boop()?;
+                        }
+
+                        if let Some(control_socket) = self.machines.get(&name).and_then(|x| x.control_stream()) {
                             self.poller.modify(control_socket, Event::readable(event.key))?;
                         }
                     }

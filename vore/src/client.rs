@@ -54,4 +54,14 @@ impl Client {
         self.send(PrepareRequest { name: vm, cdroms })?;
         Ok(())
     }
+
+    pub fn start(&mut self, vm: String, cdroms: Vec<String>) -> anyhow::Result<()> {
+        self.send(StartRequest { name: vm, cdroms })?;
+        Ok(())
+    }
+
+    pub fn stop(&mut self, vm: String) -> anyhow::Result<()> {
+        self.send(StopRequest { name: vm })?;
+        Ok(())
+    }
 }

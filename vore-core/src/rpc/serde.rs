@@ -43,6 +43,7 @@ impl CommandCenter {
     }
 
     pub fn read_answer<R: Request>(answer: &str) -> Result<(u64, R::Response), CommandError> {
+        log::debug!("Reading answer: {}", answer);
         let answer_obj: Answer<R::Response> = serde_json::from_str(answer).map_err(|err| CommandError::InternalError(err.into()))?;
 
         match answer_obj.data {

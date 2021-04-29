@@ -125,14 +125,20 @@ vore:set_build_command(function(instance, vm)
     vm:arg("-spice", "unix,addr=" .. instance.spice.socket_path .. ",disable-ticketing=on,seamless-migration=on")
   end
 
+  if instance.pulse.enabled then
+    vm:arg("-device", "intel-hda", "-device", "hda-duplex")
+    vm:arg("-audiodev", "pa,server=/run/user/1000/pulse/native,id=pa0")
+  end
+
   vm:arg(
     "-machine",
     "q35,accel=kvm,usb=off,vmport=off,dump-guest-core=off,kernel_irqchip=on"
   )
 
+  -- Pls update
   vm:arg(
     "-cpu",
-    "host,migratable=on,hv-time,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vendor-id=whatever,kvm=off"
+    "host,hv-time,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vendor-id=whatever,kvm=off,+topoext"
   )
 
   return vm

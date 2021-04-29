@@ -18,7 +18,7 @@ pub struct Answer<R: Response> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum AnswerResult<R: Response> {
     Error(AnswerError),
     #[serde(bound = "R: Response")]

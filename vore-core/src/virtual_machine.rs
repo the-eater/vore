@@ -2,7 +2,7 @@ use crate::{GlobalConfig, InstanceConfig, QemuCommandBuilder};
 use anyhow::{Context, Error};
 use beau_collector::BeauCollector;
 use qapi::qmp::{QMP, Event};
-use qapi::{Qmp, ExecuteError};
+use qapi::{Qmp};
 use std::{fmt, mem};
 use std::fmt::{Debug, Formatter, Display};
 use std::fs::{read_link, OpenOptions, read_dir};
@@ -76,7 +76,7 @@ impl Debug for ControlSocket {
     }
 }
 
-const AUTO_UNBIND_BLACKLIST: &[&str] = &["nvidia"];
+const AUTO_UNBIND_BLACKLIST: &[&str] = &["nvidia", "amdgpu"];
 
 impl VirtualMachine {
     pub fn new<P: AsRef<Path>>(
@@ -111,6 +111,8 @@ impl VirtualMachine {
         let mut results = vec![];
         results.extend(self.prepare_disks());
         results.extend(self.prepare_vfio(execute_fixes, force));
+        results.extend(self.prepare_shm());
+        results.extend(self.prepare_sockets());
         results
             .into_iter()
             .bcollect::<()>()
@@ -120,6 +122,52 @@ impl VirtualMachine {
             self.state = VirtualMachineState::Prepared;
         }
         Ok(())
+    }
+
+    pub fn prepare_shm(&mut self) -> Vec<Result<(), anyhow::Error>> {
+        let mut shm = vec![];
+        if self.config.looking_glass.enabled {
+            if self.config.looking_glass.mem_path.is_empty() {
+                self.config.looking_glass.mem_path = format!("/dev/shm/vore/{}/looking-glass", self.config.name);
+            }
+
+            shm.push(&self.config.looking_glass.mem_path);
+        }
+
+        if self.config.scream.enabled {
+            if self.config.scream.mem_path.is_empty() {
+                self.config.scream.mem_path = format!("/dev/shm/vore/{}/scream", self.config.name);
+            }
+
+            shm.push(&self.config.scream.mem_path);
+        }
+
+        shm
+            .into_iter()
+            .map(|x| Path::new(x))
+            .filter_map(|x| x.parent())
+            .filter(|x| !x.is_dir())
+            .map(|x| std::fs::create_dir_all(&x).with_context(|| format!("Failed creating directories for shared memory ({:?})", x)))
+            .collect()
+    }
+
+    pub fn prepare_sockets(&mut self) -> Vec<Result<(), anyhow::Error>> {
+        let mut sockets = vec![];
+        if self.config.spice.enabled {
+            if self.config.spice.socket_path.is_empty() {
+                self.config.spice.socket_path = self.working_dir.join("spice.sock").to_str().unwrap().to_string();
+            }
+
+            sockets.push(&self.config.spice.socket_path);
+        }
+
+        sockets
+            .into_iter()
+            .map(|x| Path::new(x))
+            .filter_map(|x| x.parent())
+            .filter(|x| !x.is_dir())
+            .map(|x| std::fs::create_dir_all(&x).with_context(|| format!("Failed creating directories for shared memory ({:?})", x)))
+            .collect()
     }
 
     ///
@@ -305,6 +353,14 @@ impl VirtualMachine {
         Ok(())
     }
 
+    pub fn boop(&mut self) -> Result<(), anyhow::Error> {
+        if let Some(qmp) = self.control_socket.as_mut() {
+            qmp.qmp.nop()?;
+        }
+
+        self.process_qmp_events()
+    }
+
     fn process_qmp_events(&mut self) -> Result<(), anyhow::Error> {
         let events = if let Some(qmp) = self.control_socket.as_mut() {
             // While we could iter, we keep hold of the mutable reference, so it's easier to just collect the events
@@ -366,18 +422,6 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub fn stop_now(&mut self) -> Result<(), anyhow::Error> {
-        self.stop()?;
-
-        if let Some(mut process) = self.process.take() {
-            self.wait(Some(Duration::from_secs(30)), VirtualMachineState::Stopped)?;
-            self.quit()?;
-            process.wait()?;
-        }
-
-        Ok(())
-    }
-
     pub fn wait_till_stopped(&mut self) -> Result<(), anyhow::Error> {
         self.wait(None, VirtualMachineState::Stopped)?;
         Ok(())
@@ -388,19 +432,12 @@ impl VirtualMachine {
             return Ok(());
         }
 
-        self.send_qmp_command(&qapi_qmp::quit {})
-            .map(|_| ())
-            .or_else(|x|
-                if let Some(ExecuteError::Io(err)) = x.downcast_ref::<ExecuteError>() {
-                    if err.kind() == ErrorKind::UnexpectedEof {
-                        Ok(())
-                    } else {
-                        Err(x)
-                    }
-                } else {
-                    Err(x)
-                })
-            .map_err(From::from)
+        match self.send_qmp_command(&qapi_qmp::quit {}) {
+            Err(err) if err.downcast_ref::<io::Error>().map_or(false, |x| x.kind() == io::ErrorKind::UnexpectedEof) => {}
+            err => { err?; }
+        }
+
+        Ok(())
     }
 
     fn wait(&mut self, duration: Option<Duration>, target_state: VirtualMachineState) -> Result<bool, anyhow::Error> {
@@ -438,8 +475,12 @@ impl VirtualMachine {
             }
         }
 
+        if self.state == VirtualMachineState::Loaded {
+            self.prepare(true, false)?
+        }
+
         let mut command = Command::new("qemu-system-x86_64");
-        command.args(self.get_cmd_line()?);
+        command.args(self.get_cmd_line().context("Failed to generate qemu command line")?);
         self.process = Some(command.spawn()?);
 
         let mut res = || {
@@ -477,7 +518,7 @@ impl VirtualMachine {
                 _info: handshake,
             };
 
-            // self.pin_qemu_threads()?;
+            self.pin_qemu_threads()?;
 
             control_socket
                 .qmp
@@ -495,7 +536,7 @@ impl VirtualMachine {
         let result_ = res();
         if result_.is_err() {
             if let Some(mut qemu) = self.process.take() {
-                qemu.kill()?;
+                let _ = qemu.kill();
                 qemu.wait()?;
             }
         }

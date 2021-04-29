@@ -1,6 +1,6 @@
 use anyhow::{Context, Error};
 use config::{Config, File, FileFormat, Value};
-use serde::de::Visitor;
+use serde::de::{Visitor};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -19,6 +19,7 @@ pub struct InstanceConfig {
     pub vfio: Vec<VfioConfig>,
     pub looking_glass: LookingGlassConfig,
     pub scream: ScreamConfig,
+    pub pulse: PulseConfig,
     pub spice: SpiceConfig,
 }
 
@@ -75,14 +76,14 @@ impl InstanceConfig {
 
         instance_config.looking_glass = LookingGlassConfig::from_table(
             config.get_table("looking-glass").unwrap_or_default(),
-            &instance_config.name,
         )?;
         instance_config.scream = ScreamConfig::from_table(
             config.get_table("scream").unwrap_or_default(),
-            &instance_config.name,
         )?;
         instance_config.spice =
             SpiceConfig::from_table(config.get_table("spice").unwrap_or_default())?;
+
+        instance_config.pulse = PulseConfig::from_table(config.get_table("pulse").unwrap_or_default())?;
 
         if let Ok(features) = config.get::<Vec<String>>("machine.features") {
             for feature in features {
@@ -91,6 +92,7 @@ impl InstanceConfig {
                     "spice" => instance_config.spice.enabled = true,
                     "scream" => instance_config.scream.enabled = true,
                     "uefi" => instance_config.uefi.enabled = true,
+                    "pulse" => instance_config.pulse.enabled = true,
                     _ => {}
                 }
             }
@@ -115,6 +117,7 @@ impl Default for InstanceConfig {
             vfio: vec![],
             looking_glass: Default::default(),
             scream: Default::default(),
+            pulse: Default::default(),
             spice: Default::default(),
         }
     }
@@ -285,7 +288,6 @@ pub struct ScreamConfig {
 impl ScreamConfig {
     pub fn from_table(
         table: HashMap<String, Value>,
-        name: &str,
     ) -> Result<ScreamConfig, anyhow::Error> {
         let mut cfg = ScreamConfig::default();
         if let Some(enabled) = table.get("enabled").cloned() {
@@ -294,8 +296,6 @@ impl ScreamConfig {
 
         if let Some(mem_path) = table.get("mem-path").cloned() {
             cfg.mem_path = mem_path.into_str()?;
-        } else {
-            cfg.mem_path = format!("/dev/shm/{}-scream", name);
         }
 
         if let Some(buffer_size) = table.get("buffer-size").cloned() {
@@ -370,7 +370,6 @@ impl LookingGlassConfig {
 
     pub fn from_table(
         table: HashMap<String, Value>,
-        name: &str,
     ) -> Result<LookingGlassConfig, anyhow::Error> {
         let mut cfg = LookingGlassConfig::default();
 
@@ -380,8 +379,6 @@ impl LookingGlassConfig {
 
         if let Some(mem_path) = table.get("mem-path").cloned() {
             cfg.mem_path = mem_path.into_str()?;
-        } else {
-            cfg.mem_path = format!("/dev/shm/{}/looking-glass", name);
         }
 
         match (table.get("buffer-size").cloned(), table.get("width").cloned(), table.get("height").cloned()) {
@@ -614,6 +611,26 @@ impl VfioConfig {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
+pub struct PulseConfig {
+    pub enabled: bool,
+}
+
+impl PulseConfig {
+    pub fn from_table(table: HashMap<String, Value>) -> Result<PulseConfig, anyhow::Error> {
+        let mut cfg = PulseConfig {
+            enabled: false,
+        };
+
+        if let Some(enabled) = table.get("enabled").cloned() {
+            cfg.enabled = enabled.into_bool()?;
+        }
+
+        Ok(cfg)
+    }
+}
+
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct SpiceConfig {
     pub enabled: bool,
     pub socket_path: String,
@@ -623,11 +640,15 @@ impl SpiceConfig {
     pub fn from_table(table: HashMap<String, Value>) -> Result<SpiceConfig, anyhow::Error> {
         let mut cfg = SpiceConfig {
             enabled: false,
-            socket_path: "/tmp/win10.sock".to_string(),
+            socket_path: "".to_string(),
         };
 
         if let Some(enabled) = table.get("enabled").cloned() {
             cfg.enabled = enabled.into_bool()?;
+        }
+
+        if let Some(socket_path) = table.get("socket-path").cloned() {
+            cfg.socket_path = socket_path.into_str()?;
         }
 
         Ok(cfg)
@@ -653,6 +674,11 @@ impl<'de> Deserialize<'de> for PCIAddress {
 
             fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("Expecting a string")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where
+                E: de::Error, {
+                Ok(v.to_string())
             }
 
             fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {

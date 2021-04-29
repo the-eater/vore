@@ -83,6 +83,9 @@ end
 ---@field enabled boolean
 ---@field socket_path string
 
+---@class Pulse
+---@field enabled boolean
+
 ---@class Instance
 ---@field name string
 ---@field kvm boolean
@@ -96,6 +99,7 @@ end
 ---@field looking_glass LookingGlass
 ---@field scream Scream
 ---@field spice Spice
+---@field pulse Pulse
 
 ----
 ---Add a disk definition to the argument list

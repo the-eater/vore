@@ -1,7 +1,13 @@
 [machine]
 name = "win10"
 memory = "12G"
-features = ["uefi", "spice", "scream"]
+features = [
+    "uefi",
+    "spice",
+    "pulse",
+    #    "scream",
+    "looking-glass"
+]
 
 [cpu]
 amount = 12
@@ -18,23 +24,23 @@ path = "/dev/disk/by-id/wwn-0x500a0751f008e09d"
 preset = "ssd"
 path = "/dev/disk/by-id/wwn-0x5002538e4038852d"
 
-#[[vfio]]
-#vendor = 0x10de
-#device = 0x1b80
-#index = 1
-#
-#graphics = true
-#
-#[[vfio]]
-#vendor = 0x10de
-#device = 0x10f0
-#index = 1
-#
-#[[vfio]]
-#vendor = 0x1022
-#device = 0x149c
-#addr = "0b:00.3"
-#
-#[looking-glass]
-#width = 2560
-#height = 1080
+[[vfio]]
+vendor = 0x10de
+device = 0x1b80
+index = 1
+
+graphics = true
+
+[[vfio]]
+vendor = 0x10de
+device = 0x10f0
+index = 1
+
+[[vfio]]
+vendor = 0x1022
+device = 0x149c
+addr = "0b:00.3"
+
+[looking-glass]
+width = 2560
+height = 1080

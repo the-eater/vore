@@ -13,7 +13,7 @@ macro_rules! define_requests {
         }
 
         #[derive(Clone, Debug, Serialize, Deserialize)]
-        #[serde(untagged, rename_all = "snake_case")]
+        #[serde(tag = "answer", rename_all = "snake_case")]
         pub enum AllResponses {
             $($name(paste! { [<$name Response >] })),+
         }
@@ -96,6 +96,10 @@ define_requests! {
     }, {})
 
     Unload({
+        pub name: String,
+    }, {})
+
+    Kill({
         pub name: String,
     }, {})
 }
