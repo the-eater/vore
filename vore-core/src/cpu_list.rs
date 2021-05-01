@@ -19,7 +19,7 @@ lazy_static! {
 
 pub fn get_cpus() -> Vec<Cpu> {
     if cfg!(target_os = "linux") {
-        return crate::cpu_list::linux::get_cpus();
+        crate::cpu_list::linux::get_cpus()
     } else {
         unimplemented!();
     }
@@ -32,7 +32,7 @@ pub struct CpuList {
 
 impl CpuList {
     pub fn _get() -> CpuList {
-        return *CPU_LIST;
+        *CPU_LIST
     }
 
     pub fn _amount() -> usize {

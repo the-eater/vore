@@ -35,7 +35,7 @@ impl CommandCenter {
 
         let mut str = serde_json::to_string(&answer)?;
         str.push('\n');
-        return Ok(str);
+        Ok(str)
     }
 
     pub fn read_command(request: &str) -> Result<Command, anyhow::Error> {

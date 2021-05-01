@@ -4,7 +4,10 @@ version = "0.1.0"
 authors = ["eater <=@eater.me>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["client"]
+host = ["qapi", "qapi-qmp", "mlua"]
+client = []
 
 [dependencies]
 config = { version = "0.11.0", default-features = false, features = ["toml"] }
@@ -13,10 +16,10 @@ serde_json = "1.0.64"
 toml = "*"
 anyhow = "1.0.40"
 kiam = "0.1"
-mlua = { version = "0.5.3", features = ["lua54", "serialize", "send"] }
+mlua = { optional = true, version = "0.5.3", features = ["lua54", "serialize", "send"] }
 beau_collector = "0.2.1"
-qapi-qmp = "0.7.0"
-qapi = { version = "0.7.0", features = ["qapi-qmp"] }
+qapi-qmp = { optional = true, version = "0.7.0" }
+qapi = { optional = true, version = "0.7.0", features = ["qapi-qmp"] }
 libc = "0.2.94"
 lazy_static = "1.4.0"
 paste = "1.0"

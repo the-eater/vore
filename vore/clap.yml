@@ -8,7 +8,6 @@ args:
       help: "Connect to the specified socket"
       required: false
       takes_value: true
-      default_value: "/run/vore.sock"
       long: conn
       short: c
 
@@ -102,6 +101,7 @@ subcommands:
       visible_alias: lg
       args:
         - vm-name:
+            long: vm
             help: "VM to start looking glass instance for, if not given the ONLY running instance will be used"
             required: false
             takes_value: true

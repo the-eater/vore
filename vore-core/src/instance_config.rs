@@ -1,6 +1,6 @@
 use anyhow::{Context, Error};
 use config::{Config, File, FileFormat, Value};
-use serde::de::{Visitor};
+use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -12,6 +12,7 @@ pub struct InstanceConfig {
     pub arch: String,
     pub chipset: String,
     pub kvm: bool,
+    pub auto_start: bool,
     pub memory: u64,
     pub cpu: CpuConfig,
     pub disks: Vec<DiskConfig>,
@@ -46,6 +47,10 @@ impl InstanceConfig {
             instance_config.memory = parse_size(&mem)?;
         }
 
+        if let Ok(auto_start) = config.get_bool("machine.auto-start") {
+            instance_config.auto_start = auto_start;
+        }
+
         if let Ok(cpu) = config.get_table("cpu") {
             instance_config.cpu.apply_table(cpu)?
         }
@@ -74,16 +79,15 @@ impl InstanceConfig {
             }
         }
 
-        instance_config.looking_glass = LookingGlassConfig::from_table(
-            config.get_table("looking-glass").unwrap_or_default(),
-        )?;
-        instance_config.scream = ScreamConfig::from_table(
-            config.get_table("scream").unwrap_or_default(),
-        )?;
+        instance_config.looking_glass =
+            LookingGlassConfig::from_table(config.get_table("looking-glass").unwrap_or_default())?;
+        instance_config.scream =
+            ScreamConfig::from_table(config.get_table("scream").unwrap_or_default())?;
         instance_config.spice =
             SpiceConfig::from_table(config.get_table("spice").unwrap_or_default())?;
 
-        instance_config.pulse = PulseConfig::from_table(config.get_table("pulse").unwrap_or_default())?;
+        instance_config.pulse =
+            PulseConfig::from_table(config.get_table("pulse").unwrap_or_default())?;
 
         if let Ok(features) = config.get::<Vec<String>>("machine.features") {
             for feature in features {
@@ -109,6 +113,7 @@ impl Default for InstanceConfig {
             arch: std::env::consts::ARCH.to_string(),
             chipset: "q35".to_string(),
             kvm: true,
+            auto_start: false,
             // 2 GB
             memory: 2 * 1024 * 1024 * 1024,
             cpu: Default::default(),
@@ -191,23 +196,19 @@ impl CpuConfig {
 
         if !table.contains_key("amount") {
             self.amount = self.sockets * self.dies * self.cores * self.threads;
-        } else {
-            if table
-                .keys()
-                .any(|x| ["cores", "sockets", "dies", "threads"].contains(&x.as_str()))
-            {
-                let calc_amount = self.sockets * self.dies * self.cores * self.threads;
-                if self.amount != calc_amount {
-                    Err(anyhow::Error::msg(format!("Amount of cpu's ({}) from sockets ({}), dies ({}), cores ({}) and threads ({}) differs from specified ({}) cpu's", calc_amount, self.sockets, self.dies, self.cores, self.threads, self.amount)))?;
-                }
-            } else {
-                if (self.amount % 2) == 0 {
-                    self.cores = self.amount / 2;
-                } else {
-                    self.threads = 1;
-                    self.cores = self.amount;
-                }
+        } else if table
+            .keys()
+            .any(|x| ["cores", "sockets", "dies", "threads"].contains(&x.as_str()))
+        {
+            let calc_amount = self.sockets * self.dies * self.cores * self.threads;
+            if self.amount != calc_amount {
+                return Err(anyhow::Error::msg(format!("Amount of cpu's ({}) from sockets ({}), dies ({}), cores ({}) and threads ({}) differs from specified ({}) cpu's", calc_amount, self.sockets, self.dies, self.cores, self.threads, self.amount)));
             }
+        } else if (self.amount % 2) == 0 {
+            self.cores = self.amount / 2;
+        } else {
+            self.threads = 1;
+            self.cores = self.amount;
         }
 
         Ok(())
@@ -240,7 +241,7 @@ fn parse_size(orig_input: &str) -> Result<u64, anyhow::Error> {
         input = &input[..input.len() - 1];
     }
 
-    if input.len() == 0 {
+    if input.is_empty() {
         return Err(anyhow::Error::msg(format!(
             "'{}' is not a valid size",
             orig_input
@@ -286,9 +287,7 @@ pub struct ScreamConfig {
 }
 
 impl ScreamConfig {
-    pub fn from_table(
-        table: HashMap<String, Value>,
-    ) -> Result<ScreamConfig, anyhow::Error> {
+    pub fn from_table(table: HashMap<String, Value>) -> Result<ScreamConfig, anyhow::Error> {
         let mut cfg = ScreamConfig::default();
         if let Some(enabled) = table.get("enabled").cloned() {
             cfg.enabled = enabled.into_bool()?;
@@ -368,9 +367,7 @@ impl LookingGlassConfig {
         self.buffer_size = buffer_size;
     }
 
-    pub fn from_table(
-        table: HashMap<String, Value>,
-    ) -> Result<LookingGlassConfig, anyhow::Error> {
+    pub fn from_table(table: HashMap<String, Value>) -> Result<LookingGlassConfig, anyhow::Error> {
         let mut cfg = LookingGlassConfig::default();
 
         if let Some(enabled) = table.get("enabled").cloned() {
@@ -434,12 +431,14 @@ impl DiskConfig {
             }).to_string()
         };
 
-        let preset = table.get("preset")
+        let preset = table
+            .get("preset")
             .cloned()
             .context("Every disk should have a preset set")?
             .into_str()?;
 
-        let read_only = table.get("read-only")
+        let read_only = table
+            .get("read-only")
             .cloned()
             .map(|x| x.into_bool())
             .transpose()
@@ -459,15 +458,16 @@ impl DiskConfig {
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct VfioConfig {
-    pub address: PCIAddress,
+    pub address: PciAddress,
     pub vendor: Option<u32>,
     pub device: Option<u32>,
     pub index: u32,
     pub graphics: bool,
     pub multifunction: bool,
+    pub reserve: bool,
 }
 
-pub fn read_pci_ids(addr: &PCIAddress) -> Result<(u32, u32), anyhow::Error> {
+pub fn read_pci_ids(addr: &PciAddress) -> Result<(u32, u32), anyhow::Error> {
     let device = std::fs::read_to_string(format!("/sys/bus/pci/devices/{:#}/device", addr))
         .with_context(|| {
             format!(
@@ -497,7 +497,7 @@ impl VfioConfig {
             .get("addr")
             .or_else(|| table.get("address"))
             .cloned()
-            .map(|x| PCIAddress::from_str(&x.into_str()?))
+            .map(|x| PciAddress::from_str(&x.into_str()?))
             .transpose()?;
 
         let vendor = table
@@ -548,7 +548,7 @@ impl VfioConfig {
 
             (None, Some(vendor), Some(device)) => {
                 let mut counter = index;
-                let mut items: Vec<(PCIAddress, u32, u32)> = vec![];
+                let mut items: Vec<(PciAddress, u32, u32)> = vec![];
 
                 for entry in std::fs::read_dir("/sys/bus/pci/devices")? {
                     let entry = entry?;
@@ -556,7 +556,7 @@ impl VfioConfig {
                     let addr_name = file_name
                         .to_str()
                         .ok_or_else(|| anyhow::anyhow!("Failed to parse PCI device name"))?;
-                    let addr = PCIAddress::from_str(addr_name)?;
+                    let addr = PciAddress::from_str(addr_name)?;
                     let (found_vendor, found_device) = read_pci_ids(&addr)?;
                     items.push((addr, found_vendor, found_device));
                 }
@@ -596,6 +596,7 @@ impl VfioConfig {
             index: 0,
             graphics: false,
             multifunction: false,
+            reserve: false,
         };
 
         if let Some(graphics) = table.get("graphics").cloned() {
@@ -604,6 +605,10 @@ impl VfioConfig {
 
         if let Some(multifunction) = table.get("multifunction").cloned() {
             cfg.multifunction = multifunction.into_bool()?;
+        }
+
+        if let Some(reserve) = table.get("reserve").cloned() {
+            cfg.reserve = reserve.into_bool()?;
         }
 
         Ok(cfg)
@@ -617,9 +622,7 @@ pub struct PulseConfig {
 
 impl PulseConfig {
     pub fn from_table(table: HashMap<String, Value>) -> Result<PulseConfig, anyhow::Error> {
-        let mut cfg = PulseConfig {
-            enabled: false,
-        };
+        let mut cfg = PulseConfig { enabled: false };
 
         if let Some(enabled) = table.get("enabled").cloned() {
             cfg.enabled = enabled.into_bool()?;
@@ -628,7 +631,6 @@ impl PulseConfig {
         Ok(cfg)
     }
 }
-
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct SpiceConfig {
@@ -656,17 +658,17 @@ impl SpiceConfig {
 }
 
 #[derive(Default, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct PCIAddress {
+pub struct PciAddress {
     domain: u32,
     bus: u8,
     slot: u8,
     func: u8,
 }
 
-impl<'de> Deserialize<'de> for PCIAddress {
+impl<'de> Deserialize<'de> for PciAddress {
     fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
-        where
-            D: Deserializer<'de>,
+    where
+        D: Deserializer<'de>,
     {
         struct X;
         impl Visitor<'_> for X {
@@ -676,8 +678,10 @@ impl<'de> Deserialize<'de> for PCIAddress {
                 formatter.write_str("Expecting a string")
             }
 
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where
-                E: de::Error, {
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 Ok(v.to_string())
             }
 
@@ -687,21 +691,22 @@ impl<'de> Deserialize<'de> for PCIAddress {
         }
 
         let x = deserializer.deserialize_string(X)?;
-        Ok(PCIAddress::from_str(&x).map_err(|x| de::Error::custom(x))?)
+
+        PciAddress::from_str(&x).map_err(de::Error::custom)
     }
 }
 
-impl Serialize for PCIAddress {
+impl Serialize for PciAddress {
     fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.serialize_str(&self.to_pci_string())
     }
 }
 
-impl PCIAddress {
-    fn to_string(&self) -> String {
+impl PciAddress {
+    fn to_pci_string(&self) -> String {
         format!(
             "{:04x}:{:02x}:{:02x}.{:x}",
             self.domain, self.bus, self.slot, self.func
@@ -709,7 +714,7 @@ impl PCIAddress {
     }
 }
 
-impl Debug for PCIAddress {
+impl Debug for PciAddress {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("PCIAddress(")?;
         if f.alternate() && self.domain == 0 {
@@ -724,7 +729,7 @@ impl Debug for PCIAddress {
     }
 }
 
-impl Display for PCIAddress {
+impl Display for PciAddress {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if f.alternate() && self.domain == 0 {
             f.write_str(&format!("{:04x}:", self.domain))?;
@@ -737,15 +742,15 @@ impl Display for PCIAddress {
     }
 }
 
-impl FromStr for PCIAddress {
+impl FromStr for PciAddress {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut rev = s.rsplit(":");
-        let mut addr = PCIAddress::default();
+        let mut rev = s.rsplit(':');
+        let mut addr = PciAddress::default();
 
         if let Some(slot_and_func) = rev.next() {
-            let mut splitter = slot_and_func.split(".");
+            let mut splitter = slot_and_func.split('.');
 
             if let Some(slot) = splitter.next() {
                 addr.slot = u8::from_str_radix(slot, 16)?;
@@ -770,20 +775,20 @@ impl FromStr for PCIAddress {
 
 #[cfg(test)]
 mod tests {
-    use crate::PCIAddress;
+    use crate::PciAddress;
     use std::str::FromStr;
 
     #[test]
     fn test_input_and_output_are_same() {
         assert_eq!(
-            PCIAddress::from_str("0000:00:00.1")
+            PciAddress::from_str("0000:00:00.1")
                 .expect("Failed to parse correct string")
                 .to_string(),
             "0000:00:00.1"
         );
 
         assert_eq!(
-            PCIAddress::from_str("0000:00:01.0")
+            PciAddress::from_str("0000:00:01.0")
                 .expect("Failed to parse correct string")
                 .to_string(),
             "0000:00:01.0"

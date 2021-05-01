@@ -9,13 +9,13 @@ macro_rules! define_requests {
         #[derive(Clone, Debug, Serialize, Deserialize)]
         #[serde(tag = "query", rename_all = "snake_case")]
         pub enum AllRequests {
-            $($name(paste! { [<$name Request >] })),+
+            $($name(Box<paste! { [<$name Request >] }>)),+
         }
 
         #[derive(Clone, Debug, Serialize, Deserialize)]
         #[serde(tag = "answer", rename_all = "snake_case")]
         pub enum AllResponses {
-            $($name(paste! { [<$name Response >] })),+
+            $($name(Box<paste! { [<$name Response >] }>)),+
         }
 
         $(
@@ -29,13 +29,13 @@ macro_rules! define_requests {
                     type Response = [<$name Response>];
 
                     fn into_enum(self) -> AllRequests {
-                        AllRequests::$name(self)
+                        AllRequests::$name(Box::new(self))
                     }
                 }
 
                 impl Response for [<$name Response>] {
                     fn into_enum(self) -> AllResponses {
-                        AllResponses::$name(self)
+                        AllResponses::$name(Box::new(self))
                     }
                 }
             }

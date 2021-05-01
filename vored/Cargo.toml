@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.40"
-vore-core = { path = "../vore-core" }
+vore-core = { path = "../vore-core", features = ["host"] }
 polling = "2.0.3"
 log = "0.4.14"
 pretty_env_logger = "0.3"

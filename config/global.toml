@@ -1,3 +1,6 @@
+[vore]
+group = "vore"
+
 [qemu]
 script = "qemu.lua"
 

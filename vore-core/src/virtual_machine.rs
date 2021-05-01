@@ -1,56 +1,31 @@
-use crate::{GlobalConfig, InstanceConfig, QemuCommandBuilder};
+#![cfg(feature = "host")]
+
+use crate::cpu_list::CpuList;
+use crate::{
+    GlobalConfig, InstanceConfig, QemuCommandBuilder, VfioConfig, VirtualMachineInfo,
+    VirtualMachineState,
+};
 use anyhow::{Context, Error};
 use beau_collector::BeauCollector;
-use qapi::qmp::{QMP, Event};
-use qapi::{Qmp};
-use std::{fmt, mem};
-use std::fmt::{Debug, Formatter, Display};
-use std::fs::{read_link, OpenOptions, read_dir};
+use libc::{cpu_set_t, sched_setaffinity, CPU_SET};
+use qapi::qmp::{Event, QMP};
+use qapi::Qmp;
+use qapi_qmp::QmpCommand;
+use std::fmt::{Debug, Formatter};
+use std::fs::{read_dir, read_link, OpenOptions};
 use std::io;
 use std::io::{BufReader, ErrorKind, Read, Write};
 use std::option::Option::Some;
 use std::os::unix::net::UnixStream;
-use std::path::{PathBuf, Path};
+use std::os::unix::prelude::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::result::Result::Ok;
+use std::slice::Iter;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use qapi_qmp::QmpCommand;
-use std::str::FromStr;
-use libc::{cpu_set_t, CPU_SET, sched_setaffinity};
-use crate::cpu_list::CpuList;
-use std::os::unix::prelude::AsRawFd;
-use serde::{Deserialize, Serialize};
-
-#[derive(Eq, PartialEq, Copy, Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VirtualMachineState {
-    Loaded,
-    Prepared,
-    Stopped,
-    Paused,
-    Running,
-}
-
-impl Display for VirtualMachineState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            VirtualMachineState::Loaded => write!(f, "loaded"),
-            VirtualMachineState::Prepared => write!(f, "prepared"),
-            VirtualMachineState::Stopped => write!(f, "stopped"),
-            VirtualMachineState::Paused => write!(f, "paused"),
-            VirtualMachineState::Running => write!(f, "running")
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct VirtualMachineInfo {
-    pub name: String,
-    pub working_dir: PathBuf,
-    pub config: InstanceConfig,
-    pub state: VirtualMachineState,
-}
+use std::{fmt, mem};
 
 #[derive(Debug)]
 pub struct VirtualMachine {
@@ -60,6 +35,7 @@ pub struct VirtualMachine {
     global_config: GlobalConfig,
     process: Option<Child>,
     control_socket: Option<ControlSocket>,
+    quit_after_shutdown: bool,
 }
 
 struct ControlSocket {
@@ -91,7 +67,12 @@ impl VirtualMachine {
             global_config: global_config.clone(),
             process: None,
             control_socket: None,
+            quit_after_shutdown: true,
         }
+    }
+
+    pub fn vfio_devices(&self) -> Iter<'_, VfioConfig> {
+        self.config.vfio.iter()
     }
 
     pub fn name(&self) -> &str {
@@ -104,6 +85,7 @@ impl VirtualMachine {
             working_dir: self.working_dir.clone(),
             config: self.config.clone(),
             state: self.state,
+            quit_after_shutdown: self.quit_after_shutdown,
         }
     }
 
@@ -128,7 +110,8 @@ impl VirtualMachine {
         let mut shm = vec![];
         if self.config.looking_glass.enabled {
             if self.config.looking_glass.mem_path.is_empty() {
-                self.config.looking_glass.mem_path = format!("/dev/shm/vore/{}/looking-glass", self.config.name);
+                self.config.looking_glass.mem_path =
+                    format!("/dev/shm/vore/{}/looking-glass", self.config.name);
             }
 
             shm.push(&self.config.looking_glass.mem_path);
@@ -142,12 +125,15 @@ impl VirtualMachine {
             shm.push(&self.config.scream.mem_path);
         }
 
-        shm
-            .into_iter()
+        shm.into_iter()
             .map(|x| Path::new(x))
             .filter_map(|x| x.parent())
             .filter(|x| !x.is_dir())
-            .map(|x| std::fs::create_dir_all(&x).with_context(|| format!("Failed creating directories for shared memory ({:?})", x)))
+            .map(|x| {
+                std::fs::create_dir_all(&x).with_context(|| {
+                    format!("Failed creating directories for shared memory ({:?})", x)
+                })
+            })
             .collect()
     }
 
@@ -155,7 +141,12 @@ impl VirtualMachine {
         let mut sockets = vec![];
         if self.config.spice.enabled {
             if self.config.spice.socket_path.is_empty() {
-                self.config.spice.socket_path = self.working_dir.join("spice.sock").to_str().unwrap().to_string();
+                self.config.spice.socket_path = self
+                    .working_dir
+                    .join("spice.sock")
+                    .to_str()
+                    .unwrap()
+                    .to_string();
             }
 
             sockets.push(&self.config.spice.socket_path);
@@ -166,7 +157,11 @@ impl VirtualMachine {
             .map(|x| Path::new(x))
             .filter_map(|x| x.parent())
             .filter(|x| !x.is_dir())
-            .map(|x| std::fs::create_dir_all(&x).with_context(|| format!("Failed creating directories for shared memory ({:?})", x)))
+            .map(|x| {
+                std::fs::create_dir_all(&x).with_context(|| {
+                    format!("Failed creating directories for shared memory ({:?})", x)
+                })
+            })
             .collect()
     }
 
@@ -214,84 +209,97 @@ impl VirtualMachine {
             Ok(_) => {}
         }
 
-        self.config.vfio.iter().map(|vfio| {
-            let pci_driver_path = format!("/sys/bus/pci/devices/{:#}/driver", vfio.address);
+        self.config
+            .vfio
+            .iter()
+            .map(|vfio| VirtualMachine::prepare_vfio_device(execute_fixes, force, vfio))
+            .collect::<Vec<_>>()
+    }
 
-            let driver = match read_link(&pci_driver_path) {
-                Ok(driver_link) => {
-                    let driver_path = driver_link.to_str().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Path to device driver for PCI device at {} is not valid utf-8",
-                            vfio.address
-                        )
-                    })?;
-                    let driver = driver_path.split("/").last().ok_or_else(|| {
-                        anyhow::anyhow!(
+    pub fn should_auto_start(&self) -> bool {
+        self.config.auto_start
+    }
+
+    pub fn prepare_vfio_device(
+        execute_fixes: bool,
+        force: bool,
+        vfio: &VfioConfig,
+    ) -> Result<(), Error> {
+        let pci_driver_path = format!("/sys/bus/pci/devices/{:#}/driver", vfio.address);
+
+        let driver = match read_link(&pci_driver_path) {
+            Ok(driver_link) => {
+                let driver_path = driver_link.to_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Path to device driver for PCI device at {} is not valid utf-8",
+                        vfio.address
+                    )
+                })?;
+                let driver = driver_path.split('/').last().ok_or_else(|| {
+                    anyhow::anyhow!(
                         "Path to device driver for PCI device at {} doesn't have a path to a driver",
                         vfio.address
                     )
-                    })?;
+                })?;
 
-                    driver.to_string()
-                }
-
-                Err(err) if err.kind() == ErrorKind::NotFound => "".to_string(),
-
-                Err(err) => return Err(err.into()),
-            };
-
-            let is_blacklisted = AUTO_UNBIND_BLACKLIST.contains(&driver.as_str()) && !force;
-
-            if driver != "vfio-pci" && (!execute_fixes || is_blacklisted) {
-                if !driver.is_empty() && is_blacklisted {
-                    anyhow::bail!("PCI device {} it's current driver is {}, but to be used with VFIO needs to be set to vfio-pci, this driver ({1}) has been blacklisted from automatic rebinding because it can't be cleanly unbound, please make sure this device is unbound before running vore", vfio.address, driver)
-                } else if !driver.is_empty() {
-                    anyhow::bail!("PCI device {} it's current driver is {}, but to be used with VFIO needs to be set to vfio-pci", vfio.address, driver)
-                } else {
-                    anyhow::bail!("PCI device at {} currently has no driver, but to be used with VFIO needs to be set to vfio-pci", vfio.address)
-                }
+                driver.to_string()
             }
 
-            if driver != "vfio-pci" && execute_fixes && !is_blacklisted {
-                let address = format!("{:#}\n", vfio.address).into_bytes();
+            Err(err) if err.kind() == ErrorKind::NotFound => "".to_string(),
 
-                if !driver.is_empty() {
-                    // Unbind the PCI device from the current driver
-                    let mut unbind = std::fs::OpenOptions::new().append(true).open(format!(
-                        "/sys/bus/pci/devices/{:#}/driver/unbind",
-                        vfio.address
-                    ))?;
+            Err(err) => return Err(err.into()),
+        };
 
-                    unbind.write_all(&address)?;
-                }
+        let is_blacklisted = AUTO_UNBIND_BLACKLIST.contains(&driver.as_str()) && !force;
 
-                {
-                    // Set a driver override
-                    let mut driver_override = OpenOptions::new().append(true).open(format!(
-                        "/sys/bus/pci/devices/{:#}/driver_override",
-                        vfio.address
-                    ))?;
+        if driver != "vfio-pci" && (!execute_fixes || is_blacklisted) {
+            if !driver.is_empty() && is_blacklisted {
+                anyhow::bail!("PCI device {} it's current driver is {}, but to be used with VFIO needs to be set to vfio-pci, this driver ({1}) has been blacklisted from automatic rebinding because it can't be cleanly unbound, please make sure this device is unbound before running vore", vfio.address, driver)
+            } else if !driver.is_empty() {
+                anyhow::bail!("PCI device {} it's current driver is {}, but to be used with VFIO needs to be set to vfio-pci", vfio.address, driver)
+            } else {
+                anyhow::bail!("PCI device at {} currently has no driver, but to be used with VFIO needs to be set to vfio-pci", vfio.address)
+            }
+        }
 
-                    driver_override.write_all(b"vfio-pci\n")?;
-                }
+        if driver != "vfio-pci" && execute_fixes && !is_blacklisted {
+            let address = format!("{:#}\n", vfio.address).into_bytes();
 
-                {
-                    // Probe the PCI device so the driver override is picked up
-                    let mut probe = OpenOptions::new()
-                        .append(true)
-                        .open("/sys/bus/pci/drivers_probe")?;
-                    probe.write_all(&address)?;
-                }
+            if !driver.is_empty() {
+                // Unbind the PCI device from the current driver
+                let mut unbind = std::fs::OpenOptions::new().append(true).open(format!(
+                    "/sys/bus/pci/devices/{:#}/driver/unbind",
+                    vfio.address
+                ))?;
 
-                let new_link = read_link(&pci_driver_path)?;
-                if !new_link.ends_with("vfio-pci") {
-                    anyhow::bail!("Tried to bind {} to vfio-pci but failed to do so (see /sys/bus/pci/devices/{:#} for more info)", vfio.address, vfio.address)
-                }
+                unbind.write_all(&address)?;
             }
 
-            Ok(())
-        })
-            .collect::<Vec<_>>()
+            {
+                // Set a driver override
+                let mut driver_override = OpenOptions::new().append(true).open(format!(
+                    "/sys/bus/pci/devices/{:#}/driver_override",
+                    vfio.address
+                ))?;
+
+                driver_override.write_all(b"vfio-pci\n")?;
+            }
+
+            {
+                // Probe the PCI device so the driver override is picked up
+                let mut probe = OpenOptions::new()
+                    .append(true)
+                    .open("/sys/bus/pci/drivers_probe")?;
+                probe.write_all(&address)?;
+            }
+
+            let new_link = read_link(&pci_driver_path)?;
+            if !new_link.ends_with("vfio-pci") {
+                anyhow::bail!("Tried to bind {} to vfio-pci but failed to do so (see /sys/bus/pci/devices/{:#} for more info)", vfio.address, vfio.address)
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get_cmd_line(&self) -> Result<Vec<String>, anyhow::Error> {
@@ -321,7 +329,11 @@ impl VirtualMachine {
                 continue;
             }
 
-            let res = entry.file_name().to_str().ok_or_else(|| anyhow::anyhow!("")).and_then(|x| usize::from_str(x).map_err(From::from));
+            let res = entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!(""))
+                .and_then(|x| usize::from_str(x).map_err(From::from));
             if res.is_err() {
                 continue;
             }
@@ -330,7 +342,11 @@ impl VirtualMachine {
             let name = entry.path().join("comm");
             let comm = std::fs::read_to_string(name)?;
             if comm.starts_with("CPU ") {
-                let nr = comm.chars().skip(4).take_while(|x| x.is_ascii_digit()).collect::<String>();
+                let nr = comm
+                    .chars()
+                    .skip(4)
+                    .take_while(|x| x.is_ascii_digit())
+                    .collect::<String>();
                 let cpu_id = usize::from_str(&nr).unwrap();
                 kvm_threads.push((tid, cpu_id));
             }
@@ -358,10 +374,12 @@ impl VirtualMachine {
             qmp.qmp.nop()?;
         }
 
-        self.process_qmp_events()
+        self.process_qmp_events()?;
+
+        Ok(())
     }
 
-    fn process_qmp_events(&mut self) -> Result<(), anyhow::Error> {
+    fn process_qmp_events(&mut self) -> anyhow::Result<()> {
         let events = if let Some(qmp) = self.control_socket.as_mut() {
             // While we could iter, we keep hold of the mutable reference, so it's easier to just collect the events
             qmp.qmp.events().collect::<Vec<_>>()
@@ -370,11 +388,11 @@ impl VirtualMachine {
         };
 
         for event in events {
-            println!("Event: {:?}", event);
+            log::info!("vm {} got event: {:?}", self.name(), event);
 
             match event {
                 Event::STOP { .. } => {
-                    if self.state != VirtualMachineState::Stopped {
+                    if self.state == VirtualMachineState::Running {
                         self.state = VirtualMachineState::Paused;
                     }
                 }
@@ -383,6 +401,10 @@ impl VirtualMachine {
                 }
                 Event::SHUTDOWN { .. } => {
                     self.state = VirtualMachineState::Stopped;
+
+                    if self.quit_after_shutdown {
+                        self.quit()?;
+                    }
                 }
 
                 _ => {}
@@ -414,7 +436,10 @@ impl VirtualMachine {
     }
 
     pub fn stop(&mut self) -> Result<(), anyhow::Error> {
-        if self.process.is_none() || self.control_socket.is_none() || self.state == VirtualMachineState::Stopped {
+        if self.process.is_none()
+            || self.control_socket.is_none()
+            || self.state == VirtualMachineState::Stopped
+        {
             return Ok(());
         }
 
@@ -433,17 +458,32 @@ impl VirtualMachine {
         }
 
         match self.send_qmp_command(&qapi_qmp::quit {}) {
-            Err(err) if err.downcast_ref::<io::Error>().map_or(false, |x| x.kind() == io::ErrorKind::UnexpectedEof) => {}
-            err => { err?; }
+            Err(err)
+                if err.downcast_ref::<io::Error>().map_or(false, |x| {
+                    x.kind() == io::ErrorKind::UnexpectedEof
+                        || x.kind() == io::ErrorKind::ConnectionReset
+                }) => {}
+            err => {
+                err?;
+            }
         }
+        self.control_socket = None;
+
+        self.state = VirtualMachineState::Prepared;
 
         Ok(())
     }
 
-    fn wait(&mut self, duration: Option<Duration>, target_state: VirtualMachineState) -> Result<bool, anyhow::Error> {
+    fn wait(
+        &mut self,
+        duration: Option<Duration>,
+        target_state: VirtualMachineState,
+    ) -> Result<bool, anyhow::Error> {
         let start = Instant::now();
         while duration.map_or(true, |dur| (Instant::now() - start) < dur) {
-            let has_socket = self.control_socket.as_mut()
+            let has_socket = self
+                .control_socket
+                .as_mut()
                 .map(|x| x.qmp.nop())
                 .transpose()?
                 .is_some();
@@ -480,7 +520,10 @@ impl VirtualMachine {
         }
 
         let mut command = Command::new("qemu-system-x86_64");
-        command.args(self.get_cmd_line().context("Failed to generate qemu command line")?);
+        command.args(
+            self.get_cmd_line()
+                .context("Failed to generate qemu command line")?,
+        );
         self.process = Some(command.spawn()?);
 
         let mut res = || {
@@ -499,7 +542,7 @@ impl VirtualMachine {
                 unix_stream = UnixStream::connect(&qemu_control_socket);
 
                 if let Some(proc) = self.process.as_mut() {
-                    if let Some(_) = proc.try_wait()? {
+                    if proc.try_wait()?.is_some() {
                         anyhow::bail!("QEMU quit early")
                     }
                 }
@@ -519,6 +562,18 @@ impl VirtualMachine {
             };
 
             self.pin_qemu_threads()?;
+
+            if self.config.looking_glass.enabled {
+                self.global_config
+                    .vore
+                    .chown(&self.config.looking_glass.mem_path)?;
+            }
+
+            if self.config.spice.enabled {
+                self.global_config
+                    .vore
+                    .chown(&self.config.spice.socket_path)?;
+            }
 
             control_socket
                 .qmp

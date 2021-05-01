@@ -1,4 +1,7 @@
-use crate::{GlobalConfig, InstanceConfig, GLOBAL_CONFIG_LOCATION};
+#![cfg(feature = "host")]
+
+use crate::consts::VORE_CONFIG;
+use crate::{GlobalConfig, InstanceConfig};
 use anyhow::Context;
 use mlua::prelude::LuaError;
 use mlua::{
@@ -8,31 +11,30 @@ use mlua::{
 use serde::ser::Error;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::{PathBuf, Path};
-use std::sync::{Arc, Mutex, Weak};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Default, Deserialize, Clone)]
-struct VM {
+struct VirtualMachine {
     args: Vec<String>,
     bus_ids: HashMap<String, usize>,
     devices: HashMap<String, String>,
     device: bool,
 }
 
-impl UserData for VM {
+impl UserData for VirtualMachine {
     fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
         methods.add_method_mut("arg", |_, this, args: MultiValue| {
             for item in args.iter() {
                 if let Value::String(item) = item {
                     let item = item.to_str()?.to_string();
                     if this.device {
-                        let mut items = item.split(",");
+                        let mut items = item.split(',');
                         if let Some(_type) = items.next() {
                             for item in items {
-                                if item.starts_with("id=") {
-                                    this.devices
-                                        .insert(_type.to_string(), item[3..].to_string());
+                                if let Some(id) = item.strip_prefix("id=") {
+                                    this.devices.insert(_type.to_string(), id.to_string());
                                     break;
                                 }
                             }
@@ -59,15 +61,13 @@ impl UserData for VM {
         });
 
         methods.add_method_mut("get_next_bus", |lua, this, name: String| {
-            format!(
-                "{}.{}",
-                name.clone(),
-                this.bus_ids
-                    .entry(name)
-                    .and_modify(|x| *x += 1)
-                    .or_insert(0)
-            )
-                .to_lua(lua)
+            let id = this
+                .bus_ids
+                .entry(name.clone())
+                .and_modify(|x| *x += 1)
+                .or_insert(0);
+
+            format!("{}.{}", name, id).to_lua(lua)
         });
 
         methods.add_method_mut("get_counter", |lua, this, args: (String, usize)| {
@@ -107,7 +107,7 @@ impl UserData for VoreLuaWeakStorage {
             let strong = weak
                 .0
                 .upgrade()
-                .ok_or(LuaError::custom("vore storage has expired"))?;
+                .ok_or_else(|| LuaError::custom("vore storage has expired"))?;
             let mut this = strong
                 .try_lock()
                 .map_err(|_| LuaError::custom("Failed to lock vore storage"))?;
@@ -126,7 +126,7 @@ impl UserData for VoreLuaWeakStorage {
                 let strong = weak
                     .0
                     .upgrade()
-                    .ok_or(LuaError::custom("vore storage has expired"))?;
+                    .ok_or_else(|| LuaError::custom("vore storage has expired"))?;
                 let mut this = strong
                     .try_lock()
                     .map_err(|_| LuaError::custom("Failed to lock vore storage"))?;
@@ -145,7 +145,7 @@ impl UserData for VoreLuaWeakStorage {
             let strong = weak
                 .0
                 .upgrade()
-                .ok_or(LuaError::custom("vore storage has expired"))?;
+                .ok_or_else(|| LuaError::custom("vore storage has expired"))?;
             let this = strong
                 .try_lock()
                 .map_err(|_| LuaError::custom("Failed to lock vore storage"))?;
@@ -168,13 +168,16 @@ impl UserData for VoreLuaWeakStorage {
 
         methods.add_method(
             "add_disk",
-            |lua, weak, args: (VM, mlua::Table, u64, mlua::Table)| -> Result<Value, mlua::Error> {
-                let (vm, instance, index, disk): (VM, mlua::Table, u64, Table) = args;
+            |lua,
+             weak,
+             args: (VirtualMachine, mlua::Table, u64, mlua::Table)|
+             -> Result<Value, mlua::Error> {
+                let (vm, instance, index, disk): (VirtualMachine, mlua::Table, u64, Table) = args;
                 let function = {
                     let strong = weak
                         .0
                         .upgrade()
-                        .ok_or(LuaError::custom("vore storage has expired"))?;
+                        .ok_or_else(|| LuaError::custom("vore storage has expired"))?;
                     let this = strong
                         .try_lock()
                         .map_err(|_| LuaError::custom("Failed to lock vore storage"))?;
@@ -223,11 +226,16 @@ impl QemuCommandBuilder {
         global: &GlobalConfig,
         working_dir: PathBuf,
     ) -> Result<QemuCommandBuilder, anyhow::Error> {
-        let lua = Path::new(GLOBAL_CONFIG_LOCATION).parent().unwrap().join(&global.qemu.script);
+        let lua = Path::new(VORE_CONFIG)
+            .parent()
+            .unwrap()
+            .join(&global.qemu.script);
 
         let builder = QemuCommandBuilder {
             lua: Lua::new(),
-            script: fs::read_to_string(&lua).with_context(|| format!("Failed to load lua qemu command build script ({:?})", lua))?,
+            script: fs::read_to_string(&lua).with_context(|| {
+                format!("Failed to load lua qemu command build script ({:?})", lua)
+            })?,
             storage: VoreLuaStorage::new(working_dir),
         };
 
@@ -260,7 +268,7 @@ impl QemuCommandBuilder {
             .eval::<()>()
             .context("Failed to run the configured qemu lua script")?;
 
-        let item = VM::default();
+        let item = VirtualMachine::default();
         let multi = MultiValue::from_vec(vec![self.lua.to_value(config)?, item.to_lua(&self.lua)?]);
 
         let working_dir = { self.storage.0.lock().unwrap().working_dir.clone() };
@@ -277,22 +285,21 @@ impl QemuCommandBuilder {
             anyhow::bail!("No qemu build command registered in lua script");
         };
 
-        let mut vm_instance = build_command.call::<MultiValue, VM>(multi)?;
+        let mut vm_instance = build_command.call::<MultiValue, VirtualMachine>(multi)?;
 
-        let mut cmd: Vec<String> = vec![];
-        cmd.push("-name".to_string());
-        cmd.push(format!("guest={},debug-threads=on", config.name));
-
-        // Don't start the machine
-        cmd.push("-S".to_string());
-
-        // Set timestamps on log
-        cmd.push("-msg".to_string());
-        cmd.push("timestamp=on".to_string());
-
-        // Drop privileges as soon as possible
-        cmd.push("-runas".to_string());
-        cmd.push("nobody".to_string());
+        // Weird building way is for clarity sake
+        let mut cmd: Vec<String> = vec![
+            "-name".into(),
+            format!("guest={},debug-threads=on", config.name),
+            // Don't start the machine
+            "-S".into(),
+            // Set timestamps on log
+            "-msg".into(),
+            "timestamp=on".into(),
+            // Drop privileges as soon as possible
+            "-runas".into(),
+            "nobody".into(),
+        ];
 
         let working_dir = working_dir
             .to_str()

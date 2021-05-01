@@ -5,7 +5,6 @@ features = [
     "uefi",
     "spice",
     "pulse",
-    #    "scream",
     "looking-glass"
 ]
 

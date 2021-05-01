@@ -126,7 +126,7 @@ vore:set_build_command(function(instance, vm)
   end
 
   if instance.pulse.enabled then
-    vm:arg("-device", "intel-hda", "-device", "hda-duplex")
+    vm:arg("-device", "intel-hda", "-device", "hda-duplex,audiodev=pa0")
     vm:arg("-audiodev", "pa,server=/run/user/1000/pulse/native,id=pa0")
   end
 
