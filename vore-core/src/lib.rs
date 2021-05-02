@@ -1,10 +1,11 @@
+pub mod consts;
+mod cpu_list;
 mod global_config;
 mod instance_config;
 mod qemu;
-mod virtual_machine;
-mod cpu_list;
 pub mod rpc;
-pub mod consts;
+pub mod utils;
+mod virtual_machine;
 mod virtual_machine_info;
 
 pub use global_config::*;
@@ -16,7 +17,8 @@ pub use virtual_machine_info::*;
 
 pub fn init_logging() {
     let mut builder = pretty_env_logger::formatted_timed_builder();
-    #[cfg(debug_assertions)] {
+    #[cfg(debug_assertions)]
+    {
         use log::LevelFilter;
         builder.filter_level(LevelFilter::Debug);
     }

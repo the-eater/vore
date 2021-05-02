@@ -467,8 +467,12 @@ impl VirtualMachine {
                 err?;
             }
         }
-        self.control_socket = None;
 
+        if let Some(mut proc) = self.process.take() {
+            let _ = proc.wait();
+        }
+
+        self.control_socket = None;
         self.state = VirtualMachineState::Prepared;
 
         Ok(())

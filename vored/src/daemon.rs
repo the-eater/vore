@@ -4,7 +4,6 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle, Signals, SignalsInfo};
 use signal_hook::low_level::signal_name;
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::fs;
 use std::fs::{read_dir, read_to_string, DirEntry};
 use std::io::{Read, Write};
@@ -16,8 +15,9 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{io, mem};
 use vore_core::consts::{VORE_CONFIG, VORE_DIRECTORY, VORE_SOCKET};
-use vore_core::rpc::{AllRequests, AllResponses, Command, CommandCenter, Response};
-use vore_core::{rpc, VirtualMachineInfo};
+use vore_core::rpc::{AllRequests, AllResponses, Command, CommandCenter, DiskPreset, Response};
+use vore_core::utils::get_username_by_uid;
+use vore_core::{rpc, QemuCommandBuilder, VirtualMachineInfo};
 use vore_core::{GlobalConfig, InstanceConfig, VirtualMachine};
 
 #[derive(Debug)]
@@ -400,6 +400,19 @@ impl Daemon {
 
                 rpc::StartResponse {}.into_enum()
             }
+            AllRequests::DiskPresets(_) => {
+                let builder =
+                    QemuCommandBuilder::new(&self.global_config, PathBuf::from("/dev/empty"))?;
+
+                rpc::DiskPresetsResponse {
+                    presets: builder
+                        .list_presets()?
+                        .into_iter()
+                        .map(|(name, description)| DiskPreset { name, description })
+                        .collect(),
+                }
+                .into_enum()
+            }
         };
 
         Ok(resp)
@@ -491,7 +504,6 @@ impl Daemon {
 
             stream.set_nonblocking(true)?;
 
-            let mut user: Option<String> = None;
             let ucred = unsafe {
                 let mut ucred: libc::ucred = mem::zeroed();
                 let mut length = size_of::<libc::ucred>() as u32;
@@ -502,16 +514,10 @@ impl Daemon {
                     (&mut ucred) as *mut _ as _,
                     &mut length,
                 );
-                let passwd = libc::getpwuid(ucred.uid);
-                if !passwd.is_null() {
-                    user = CStr::from_ptr((*passwd).pw_name)
-                        .to_str()
-                        .ok()
-                        .map(|x| x.to_string())
-                }
-
                 ucred
             };
+
+            let user = get_username_by_uid(ucred.uid)?;
 
             let conn = RpcConnection {
                 stream,

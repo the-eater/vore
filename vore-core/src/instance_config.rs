@@ -1,3 +1,4 @@
+use crate::utils::get_uid_by_username;
 use anyhow::{Context, Error};
 use config::{Config, File, FileFormat, Value};
 use serde::de::Visitor;
@@ -140,8 +141,8 @@ pub struct CpuConfig {
 impl Default for CpuConfig {
     fn default() -> Self {
         CpuConfig {
-            amount: 2,
-            cores: 1,
+            amount: 4,
+            cores: 2,
             threads: 2,
             dies: 1,
             sockets: 1,
@@ -357,9 +358,13 @@ impl LookingGlassConfig {
         // Add additional 2mb
         minimum_needed += 2 * 1024 * 1024;
 
+        self.set_buffer_size(minimum_needed);
+    }
+
+    pub fn set_buffer_size(&mut self, wanted: u64) {
         let mut i = 1;
         let mut buffer_size = 1;
-        while buffer_size < minimum_needed {
+        while buffer_size <= wanted {
             i += 1;
             buffer_size = 2u64.pow(i);
         }
@@ -380,7 +385,7 @@ impl LookingGlassConfig {
 
         match (table.get("buffer-size").cloned(), table.get("width").cloned(), table.get("height").cloned()) {
             (Some(buffer_size), None, None) => {
-                cfg.buffer_size = buffer_size.into_int()? as u64;
+                cfg.set_buffer_size(buffer_size.into_int()? as u64);
             }
 
             (None, Some(width), Some(height)) => {
@@ -618,14 +623,40 @@ impl VfioConfig {
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct PulseConfig {
     pub enabled: bool,
+    pub socket_path: String,
+    pub user: String,
+    pub user_uid: u32,
 }
 
 impl PulseConfig {
     pub fn from_table(table: HashMap<String, Value>) -> Result<PulseConfig, anyhow::Error> {
-        let mut cfg = PulseConfig { enabled: false };
+        let mut cfg = PulseConfig {
+            enabled: false,
+            socket_path: "".to_string(),
+            user: "#1000".to_string(),
+            user_uid: 1000,
+        };
 
         if let Some(enabled) = table.get("enabled").cloned() {
             cfg.enabled = enabled.into_bool()?;
+        }
+
+        if let Some(socket_path) = table.get("socket-path").cloned() {
+            cfg.socket_path = socket_path.into_str()?;
+        }
+
+        if let Some(user) = table.get("user").cloned() {
+            cfg.user = user.into_str()?;
+        }
+
+        if cfg.socket_path.is_empty() {
+            if let Some(number) = cfg.user.strip_prefix('#') {
+                cfg.user_uid = u32::from_str(number).with_context(|| {
+                    format!("Couldn't parse {} as number (for pulse.user)", number)
+                })?;
+            } else {
+                cfg.user_uid = get_uid_by_username(&cfg.user)?;
+            }
         }
 
         Ok(cfg)

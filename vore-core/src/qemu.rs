@@ -11,9 +11,9 @@ use mlua::{
 use serde::ser::Error;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::{fs, mem};
 
 #[derive(Debug, Default, Deserialize, Clone)]
 struct VirtualMachine {
@@ -97,8 +97,14 @@ pub struct VoreLuaWeakStorage(Weak<Mutex<VoreLuaStorageInner>>);
 #[derive(Debug)]
 pub struct VoreLuaStorageInner {
     build_command: Option<RegistryKey>,
-    disk_presets: HashMap<String, RegistryKey>,
+    disk_presets: HashMap<String, VoreLuaDiskPreset>,
     working_dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct VoreLuaDiskPreset {
+    description: String,
+    callback: RegistryKey,
 }
 
 impl UserData for VoreLuaWeakStorage {
@@ -122,7 +128,7 @@ impl UserData for VoreLuaWeakStorage {
 
         methods.add_method(
             "register_disk_preset",
-            |lua, weak, args: (mlua::String, Function)| {
+            |lua, weak, args: (mlua::String, mlua::String, Function)| {
                 let strong = weak
                     .0
                     .upgrade()
@@ -130,10 +136,18 @@ impl UserData for VoreLuaWeakStorage {
                 let mut this = strong
                     .try_lock()
                     .map_err(|_| LuaError::custom("Failed to lock vore storage"))?;
-                let key = lua.create_registry_value(args.1)?;
+                let key = lua.create_registry_value(args.2)?;
 
-                if let Some(old) = this.disk_presets.insert(args.0.to_str()?.to_string(), key) {
-                    lua.remove_registry_value(old)?;
+                let new_preset = VoreLuaDiskPreset {
+                    description: args.1.to_str()?.to_string(),
+                    callback: key,
+                };
+
+                if let Some(old) = this
+                    .disk_presets
+                    .insert(args.0.to_str()?.to_string(), new_preset)
+                {
+                    lua.remove_registry_value(old.callback)?;
                 }
 
                 Ok(Value::Nil)
@@ -187,7 +201,7 @@ impl UserData for VoreLuaWeakStorage {
                         .with_context(|| format!("Disk {} has no preset", index))
                         .map_err(LuaError::external)?;
 
-                    let key = this
+                    let preset = this
                         .disk_presets
                         .get(&preset_name)
                         .clone()
@@ -196,7 +210,7 @@ impl UserData for VoreLuaWeakStorage {
                         })
                         .map_err(LuaError::external)?;
 
-                    lua.registry_value::<Function>(key)?
+                    lua.registry_value::<Function>(&preset.callback)?
                 };
 
                 function.call((vm, instance, index, disk))
@@ -262,6 +276,28 @@ impl QemuCommandBuilder {
         Ok(())
     }
 
+    pub fn list_presets(self) -> anyhow::Result<Vec<(String, String)>> {
+        self.lua
+            .load(&self.script)
+            .eval::<()>()
+            .context("Failed to run the configured qemu lua script")?;
+
+        let result = {
+            self.storage
+                .0
+                .lock()
+                .unwrap()
+                .disk_presets
+                .iter()
+                .map(|(name, preset)| (name.clone(), preset.description.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        self.clean_up()?;
+
+        Ok(result)
+    }
+
     pub fn build(self, config: &InstanceConfig) -> Result<Vec<String>, anyhow::Error> {
         self.lua
             .load(&self.script)
@@ -286,6 +322,8 @@ impl QemuCommandBuilder {
         };
 
         let mut vm_instance = build_command.call::<MultiValue, VirtualMachine>(multi)?;
+
+        mem::drop(build_command);
 
         // Weird building way is for clarity sake
         let mut cmd: Vec<String> = vec![
@@ -318,6 +356,12 @@ impl QemuCommandBuilder {
 
         cmd.append(&mut vm_instance.args);
 
+        self.clean_up()?;
+
+        Ok(cmd)
+    }
+
+    pub fn clean_up(self) -> anyhow::Result<()> {
         self.lua.globals().raw_remove("vore")?;
 
         self.lua.gc_collect()?;
@@ -335,11 +379,11 @@ impl QemuCommandBuilder {
         self.lua
             .remove_registry_value(storage.build_command.unwrap())?;
         for (_, item) in storage.disk_presets.into_iter() {
-            self.lua.remove_registry_value(item)?;
+            self.lua.remove_registry_value(item.callback)?;
         }
 
         self.lua.gc_collect()?;
 
-        Ok(cmd)
+        Ok(())
     }
 }

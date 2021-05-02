@@ -1,9 +1,9 @@
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use vore_core::rpc::{CommandCenter, Request};
-use std::io::{BufReader, Write, BufRead};
-use vore_core::{CloneableUnixStream, VirtualMachineInfo};
 use vore_core::rpc::*;
+use vore_core::rpc::{CommandCenter, Request};
+use vore_core::{CloneableUnixStream, VirtualMachineInfo};
 
 pub struct Client {
     stream: CloneableUnixStream,
@@ -33,17 +33,28 @@ impl Client {
         Ok(info)
     }
 
-    pub fn load_vm(&mut self, toml: &str, save: bool, cdroms: Vec<String>) -> anyhow::Result<VirtualMachineInfo> {
-        Ok(self.send(LoadRequest {
-            cdroms,
-            save,
-            toml: toml.to_string(),
-            working_directory: None,
-        })?.info)
+    pub fn load_vm(
+        &mut self,
+        toml: &str,
+        save: bool,
+        cdroms: Vec<String>,
+    ) -> anyhow::Result<VirtualMachineInfo> {
+        Ok(self
+            .send(LoadRequest {
+                cdroms,
+                save,
+                toml: toml.to_string(),
+                working_directory: None,
+            })?
+            .info)
     }
 
     pub fn list_vms(&mut self) -> anyhow::Result<Vec<VirtualMachineInfo>> {
         Ok(self.send(ListRequest {})?.items)
+    }
+
+    pub fn list_disk_presets(&mut self) -> anyhow::Result<Vec<DiskPreset>> {
+        Ok(self.send(DiskPresetsRequest {})?.presets)
     }
 
     pub fn host_version(&mut self) -> anyhow::Result<InfoResponse> {

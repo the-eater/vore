@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.40"
-vore-core = { path = "../vore-core" }
+vore-core = { features = ["client"], path = "../vore-core" }
 log = "0.4.14"
 pretty_env_logger = "0.3"
 clap = { version = "2.33.3", features = ["yaml"] }

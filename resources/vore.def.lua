@@ -114,8 +114,9 @@ end
 ----
 ---Register a disk preset
 ---@param name string
+---@param description string
 ---@param cb fun(vm: VM, instance: Instance, idx: number, disk: Disk): VM
-function vore:register_disk_preset(name, cb)
+function vore:register_disk_preset(name, description, cb)
 end
 
 ---set_build_command

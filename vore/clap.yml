@@ -75,6 +75,12 @@ subcommands:
             takes_value: true
   - list:
       about: "List loaded VMs"
+  - disk:
+      setting: SubcommandRequiredElseHelp
+      about: "Disk related actions"
+      subcommands:
+        - presets:
+            about: "List the defined presets as currently known to the daemon"
 
   - scream:
       setting: SubcommandRequiredElseHelp

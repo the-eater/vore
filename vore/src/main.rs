@@ -8,6 +8,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::{fs, mem};
 use vore_core::consts::VORE_SOCKET;
+use vore_core::rpc::DiskPreset;
 use vore_core::{init_logging, VirtualMachineInfo};
 
 fn main() {
@@ -58,6 +59,16 @@ fn main_res() -> anyhow::Result<()> {
 
             (s, _) => {
                 log::error!("Subcommand daemon.{} not implemented", s);
+            }
+        },
+
+        ("disk", Some(args)) => match args.subcommand() {
+            ("presets", _) => {
+                vore.list_presets()?;
+            }
+
+            (s, _) => {
+                log::error!("Subcommand disk.{} not implemented", s);
             }
         },
 
@@ -135,6 +146,16 @@ impl VoreApp {
 
         for info in items {
             println!("{}\t{}", info.name, info.state)
+        }
+
+        Ok(())
+    }
+
+    fn list_presets(&mut self) -> anyhow::Result<()> {
+        let items = self.client.list_disk_presets()?;
+
+        for DiskPreset { name, description } in items {
+            println!("{}\t{}", name, description)
         }
 
         Ok(())

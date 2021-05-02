@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
-use paste::paste;
 use crate::rpc::{Request, Response};
 use crate::VirtualMachineInfo;
+use paste::paste;
+use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 
 macro_rules! define_requests {
     ($($name:ident($req:tt, $resp:tt))+) => {
@@ -57,6 +57,12 @@ impl Response for AllResponses {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiskPreset {
+    pub name: String,
+    pub description: String,
+}
+
 define_requests! {
     Info({}, {
         pub name: String,
@@ -102,4 +108,8 @@ define_requests! {
     Kill({
         pub name: String,
     }, {})
+
+    DiskPresets({}, {
+        pub presets: Vec<DiskPreset>
+    })
 }

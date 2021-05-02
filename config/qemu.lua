@@ -125,6 +125,10 @@ vore:set_build_command(function(instance, vm)
     vm:arg("-spice", "unix,addr=" .. instance.spice.socket_path .. ",disable-ticketing=on,seamless-migration=on")
   end
 
+  if instance.jack.enabled then
+
+  end
+
   if instance.pulse.enabled then
     vm:arg("-device", "intel-hda", "-device", "hda-duplex,audiodev=pa0")
     vm:arg("-audiodev", "pa,server=/run/user/1000/pulse/native,id=pa0")
@@ -201,13 +205,13 @@ function ide_disk_gen(name, device_type)
   end
 end
 
-vore:register_disk_preset("ssd", virtio_scsi_disk_gen("ssd"))
-vore:register_disk_preset("hdd", virtio_scsi_disk_gen("hdd"))
+vore:register_disk_preset("ssd", "virtio based SSD (requires virtio drivers)", virtio_scsi_disk_gen("ssd"))
+vore:register_disk_preset("hdd", "virtio based HDD (requires virtio drivers)", virtio_scsi_disk_gen("hdd"))
 
-vore:register_disk_preset("iso", ide_disk_gen("iso", "ide-cd"))
-vore:register_disk_preset("ide", ide_disk_gen("ide", "ide-hd"))
+vore:register_disk_preset("iso", "IDE based CD", ide_disk_gen("iso", "ide-cd"))
+vore:register_disk_preset("ide", "IDE based HDD  (not recommended, useful when missing virtio drivers)", ide_disk_gen("ide", "ide-hd"))
 
-vore:register_disk_preset("nvme", function(vm, _, _, disk)
+vore:register_disk_preset("nvme", "PCIe based NVMe drive", function(vm, _, _, disk)
   local nvme_id = vm:get_counter("nvme", 1)
 
   -- see https://blog.christophersmart.com/2019/12/18/kvm-guests-with-emulated-ssd-and-nvme-drives/
